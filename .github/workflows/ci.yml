@@ -23,12 +23,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: |
           python -m pip install --upgrade pip
-          # Until bayerlink is on PyPI, CI takes it from git. This line, not
-          # the package metadata, carries the direct reference -- the wheel
-          # stays publishable.
-          pip install "bayerlink @ git+https://github.com/bayerlink/bayerlink"
           pip install -e ".[test]"
-      - run: pytest -q || echo "no tests here yet: the protocol tests moved to bayerlink"
+      - run: |
+          # No tests live here yet -- the protocol tests moved to bayerlink
+          # with the protocol. The CLI step below is this repo's smoke test.
+          pytest -q || true
       - name: The CLI produces a container that decodes
         run: |
           picam2hdmi pattern --mode corners --width 64 --height 32 \
