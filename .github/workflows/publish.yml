@@ -1,0 +1,84 @@
+# Publish picam2hdmi to PyPI via Trusted Publishing (OIDC) -- no stored token.
+#
+# One-time setup on PyPI (AFTER the org transfer, so the binding is right):
+#   https://pypi.org/manage/account/publishing/ -> add a pending publisher
+#     PyPI project name : picam2hdmi
+#     Owner             : bayerlink
+#     Repository        : picam2hdmi
+#     Workflow          : publish.yml
+#     Environment       : pypi
+# Then in this repository: Settings -> Environments -> create `pypi`,
+# with a required reviewer so an accidental tag cannot publish.
+#
+# To release: bump version in pyproject.toml, tag vX.Y.Z, publish a GitHub
+# Release from the tag.
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and check
+        run: |
+          python -m pip install --upgrade pip build twine packaging
+          python -m build
+          twine check --strict dist/*
+      - name: Verify the tag matches the declared version
+        if: github.event_name == 'release'
+        run: |
+          python - <<'PY'
+          import os, pathlib, sys, tomllib
+          from packaging.version import Version
+          declared = tomllib.loads(
+              pathlib.Path("pyproject.toml").read_text())["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          if Version(declared) != Version(tag):
+              sys.exit(f"tag {tag!r} != pyproject version {declared!r}")
+          print("tag and version agree:", declared)
+          PY
+      - name: Refuse to release before bayerlink is on PyPI
+        run: |
+          python - <<'PY'
+          import sys, urllib.request
+          try:
+              urllib.request.urlopen("https://pypi.org/pypi/bayerlink/json", timeout=15)
+          except Exception:
+              sys.exit("bayerlink is not on PyPI yet; this wheel depends on it, "
+                       "so its release goes first. See the bayerlink repository.")
+          print("bayerlink is on PyPI; dependency resolvable")
+          PY
+      - name: Install the wheel into a clean environment
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install dist/*.whl
+          /tmp/clean/bin/python -c "import picam2hdmi; print('picam2hdmi', picam2hdmi.__version__)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+  pypi:
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
