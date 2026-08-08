@@ -18,7 +18,7 @@ def main(argv=None) -> int:
 
     pat = sub.add_parser(
         "pattern",
-        help="encode a test pattern into a rawlink container (runs anywhere)")
+        help="encode a test pattern into a bayerlink container (runs anywhere)")
     pat.add_argument("--mode", default="counting",
                      choices=sorted(pattern.PATTERNS))
     pat.add_argument("--width", type=int, default=2028,

@@ -13,7 +13,7 @@ Picamera2 (libcamera), raw stream only:
   rule in PROTOCOL.md);
 - the ISP is NOT in the loop: the raw stream is the sensor's own packed
   output, DMA-written by the CSI receiver. The Bayer order and bit depth
-  come from libcamera's reported format and go straight into the rawlink
+  come from libcamera's reported format and go straight into the bayerlink
   fourcc -- this tool never holds a sensor register table, which is the
   point: the kernel drivers that know those tables run in THEIR project,
   under their licence, and every camera libcamera supports works here
