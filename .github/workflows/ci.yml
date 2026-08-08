@@ -1,0 +1,31 @@
+# The protocol and patterns run anywhere, so they are tested everywhere pushes
+# land. The Pi-only paths (KMS scanout, Picamera2 capture) are hardware and are
+# proven on hardware, not mocked here into a green light that means nothing.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - run: pytest -q
+      - name: The CLI produces a container that decodes
+        run: |
+          picam2hdmi pattern --mode corners --width 64 --height 32 \
+            --display 64x40 --out /tmp/frame.npy

@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "picam2hdmi"
+version = "0.1.0"
+description = "Raspberry Pi camera as a raw-Bayer HDMI source: the rawlink protocol and its reference implementation"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Serge Rabyking" }]
+requires-python = ">=3.9"
+keywords = ["raspberry-pi", "picamera2", "bayer", "raw", "hdmi", "fpga", "camera", "libcamera"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Video :: Capture",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Software Development :: Embedded Systems",
+]
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+# The capture backend, on the Pi itself. Everything else -- the protocol, the
+# patterns, decoding captured frames on the receiver's host -- needs numpy only.
+pi = ["picamera2"]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/lanserge/picam2hdmi"
+Source = "https://github.com/lanserge/picam2hdmi"
+Issues = "https://github.com/lanserge/picam2hdmi/issues"
+
+[project.scripts]
+picam2hdmi = "picam2hdmi.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["picam2hdmi*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
