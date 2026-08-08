@@ -87,3 +87,24 @@ def test_pick_mode_takes_the_exact_request_or_refuses():
     with pytest.raises(RuntimeError, match="Refusing a near miss"):
         kms.pick_mode(modes, (1920, 1080, 25))
     assert kms.pick_mode(modes, None).vrefresh == 60     # preferred flag wins
+
+
+def test_pattern_frames_through_the_luma_tunnel_round_trip():
+    """Encoder-side proof: what stream() would scan out, decoded end to end."""
+    from bayerlink import tunnel
+    from picam2hdmi.output import pattern_frames
+
+    display = (192, 40)
+    frames = pattern_frames("corners", 32, 8, "RGGB", display,
+                            luma_tunnel=True)
+    grey0 = next(frames)
+    grey1 = next(frames)
+    assert grey0.shape == (40, 192, 3)
+    assert (grey0[:, :, 0] == grey0[:, :, 1]).all()
+
+    inner_w, inner_h = tunnel.inner_display(*display)
+    for index, grey in ((0, grey0), (1, grey1)):
+        container = tunnel.decode(grey[:, :, 0], inner_height=inner_h)
+        header, raw = decode_frame(container)
+        assert header.frame_seq == index
+        assert np.array_equal(raw, pattern.generate("corners", 32, 8))

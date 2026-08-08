@@ -49,6 +49,10 @@ def main(argv=None) -> int:
                         help="required display mode WxH@Hz, or 'preferred'")
     stream.add_argument("--connector", type=int, default=None)
     stream.add_argument("--card", default=None, help="/dev/dri/cardN override")
+    stream.add_argument("--luma-tunnel", action="store_true",
+                        help="wrap the container in bayerlink's luma tunnel, "
+                             "for Y-only capture paths (cheap YUY2 dongles); "
+                             "pick a small --width/--height, capacity is 1/6")
 
     args = parser.parse_args(argv)
 
@@ -91,7 +95,8 @@ def main(argv=None) -> int:
                          "must be encoded for a known geometry, so require "
                          "the mode explicitly (e.g. --mode 1920x1080@30)")
         frames = output.pattern_frames(args.pattern, args.width, args.height,
-                                       args.bayer, display)
+                                       args.bayer, display,
+                                       luma_tunnel=args.luma_tunnel)
         try:
             output.stream(frames, mode=want, connector=args.connector,
                           card_path=args.card,

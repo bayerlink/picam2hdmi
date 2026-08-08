@@ -102,16 +102,37 @@ def stream(frames, mode: tuple[int, int, int] | None = None,
 
 
 def pattern_frames(mode_name: str, cam_width: int, cam_height: int,
-                   bayer: str, display: tuple[int, int]):
+                   bayer: str, display: tuple[int, int],
+                   luma_tunnel: bool = False):
     """An endless container source from one test pattern.
 
     The payload is encoded ONCE; each frame only re-stamps the header's
     frame counter. This is the phase-0 source: deterministic, regenerable on
     the receiving side by the same published package, and cheap enough that
     the loop is all flips.
+
+    ``luma_tunnel`` wraps the container in bayerlink's experimental luma
+    tunnel: nibbles as grey levels plus a pilot line, so a Y-only capture
+    path (a cheap YUY2 dongle) still recovers the bytes exactly. The
+    container underneath is unchanged -- it is encoded for the tunnel's
+    smaller virtual display, and the receiver hands the recovered container
+    to the same decode_frame() as ever. Costs 6x capacity; a conformance
+    bench does not care.
     """
     from bayerlink import encode_frame, pattern
     from bayerlink.protocol import FLAG_TEST_PATTERN
+
+    if luma_tunnel:
+        from bayerlink import tunnel
+        inner = tunnel.inner_display(*display)
+        raw = pattern.generate(mode_name, cam_width, cam_height)
+        container = encode_frame(raw, bayer, frame_seq=0, display=inner,
+                                 flags=FLAG_TEST_PATTERN)
+        sequence = 0
+        while True:
+            patch_frame_seq(container, sequence)
+            yield tunnel.encode(container, display)
+            sequence += 1
 
     raw = pattern.generate(mode_name, cam_width, cam_height)
     container = encode_frame(raw, bayer, frame_seq=0, display=display,
