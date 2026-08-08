@@ -1,28 +1,17 @@
-"""picam2hdmi -- a Raspberry Pi camera as a raw-Bayer HDMI source.
+"""picam2hdmi -- a Raspberry Pi camera as a bayerlink HDMI source.
 
-Raw sensor frames travel the HDMI link as bytes, self-described by one
-header line: the rawlink protocol, specified in PROTOCOL.md and implemented
-in .protocol -- which runs on BOTH ends of the link, encoding on the Pi and
-decoding whatever the receiver captured.
+The wire format is the bayerlink protocol (github.com/lanserge/bayerlink);
+this tool is its reference ENCODER for the Pi. The protocol package runs on
+both ends of the link, so the container-building lives there and what lives
+here is only what is the Pi's: capture (Picamera2) and scanout (KMS).
 """
-from .protocol import (
-    BAYER_PHASE,
-    FLAG_TEST_PATTERN,
+from bayerlink import (  # noqa: F401  (re-exported for convenience)
     Header,
-    check_geometry,
     decode_frame,
     encode_frame,
-    fits_line_rate,
-    fourcc_for,
-    pack12p,
-    unpack12p,
+    pattern,
 )
-from . import pattern
 
 __version__ = "0.1.0"
 
-__all__ = [
-    "Header", "encode_frame", "decode_frame", "pack12p", "unpack12p",
-    "check_geometry", "fits_line_rate", "fourcc_for",
-    "BAYER_PHASE", "FLAG_TEST_PATTERN", "pattern",
-]
+__all__ = ["Header", "encode_frame", "decode_frame", "pattern"]

@@ -6,13 +6,14 @@ import sys
 
 import numpy as np
 
-from . import pattern, protocol
+from bayerlink import pattern, protocol
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="picam2hdmi",
-        description="Raw Bayer over HDMI (rawlink). See PROTOCOL.md.")
+        description="Raw Bayer over HDMI, speaking bayerlink v1 "
+                    "(github.com/lanserge/bayerlink).")
     sub = parser.add_subparsers(dest="command", required=True)
 
     pat = sub.add_parser(
