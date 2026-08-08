@@ -13,7 +13,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="picam2hdmi",
         description="Raw Bayer over HDMI, speaking bayerlink v1 "
-                    "(github.com/lanserge/bayerlink).")
+                    "(github.com/bayerlink/bayerlink).")
     sub = parser.add_subparsers(dest="command", required=True)
 
     pat = sub.add_parser(

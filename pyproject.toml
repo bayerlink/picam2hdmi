@@ -35,9 +35,9 @@ pi = ["picamera2"]
 test = ["pytest"]
 
 [project.urls]
-Homepage = "https://github.com/lanserge/picam2hdmi"
-Source = "https://github.com/lanserge/picam2hdmi"
-Issues = "https://github.com/lanserge/picam2hdmi/issues"
+Homepage = "https://github.com/bayerlink/picam2hdmi"
+Source = "https://github.com/bayerlink/picam2hdmi"
+Issues = "https://github.com/bayerlink/picam2hdmi/issues"
 
 [project.scripts]
 picam2hdmi = "picam2hdmi.cli:main"
