@@ -1,0 +1,77 @@
+# picam2hdmi
+
+**A Raspberry Pi camera as a raw-Bayer HDMI source.**
+
+FPGA boards rarely have a camera connector, but nearly all of them have
+HDMI-in. A Raspberry Pi has the opposite: a first-class camera stack — every
+sensor libcamera supports, drivers, modes, controls — and an HDMI output.
+picam2hdmi turns the Pi into a **sensor module with an HDMI plug**: raw
+12-bit Bayer frames, straight from the sensor's CSI-2 output with the ISP
+bypassed, carried over the display link as bytes and self-described by a
+header line.
+
+```
+sensor ──CSI-2──▶ Pi (libcamera raw, zero-copy) ──HDMI──▶ any receiver with HDMI-in
+```
+
+No transcoding, no compression, no per-sensor code in this tool: the Bayer
+order and bit depth travel in the stream itself, so a receiver built once
+works with every camera the Pi supports.
+
+## The protocol: bayerlink
+
+The wire format is **[bayerlink](https://github.com/bayerlink/bayerlink)** —
+the display's active area as a byte container, one header line making the
+stream self-describing. The spec, the reference codec and the conformance
+vectors live in the protocol's own repository, because this tool is one
+encoder among several and should not own the contract receivers implement.
+
+The codec runs on **both ends**: this tool encodes with it on the Pi, and a
+receiver's host software decodes captured frames with the same package —
+
+```python
+import bayerlink
+
+header, raw = bayerlink.decode_frame(captured)    # (H, W, 3) uint8 in
+print(header.bayer_order, header.width, header.height, header.frame_seq)
+# raw: (lines, samples) uint16, exactly what the sensor produced
+```
+
+## Status
+
+| Piece | State |
+| --- | --- |
+| bayerlink v2 protocol, patterns, vectors | **done** — in [bayerlink](https://github.com/bayerlink/bayerlink) |
+| CLI: pattern → container file | **done** |
+| KMS scanout (double-buffered, full-range RGB forced) | **implemented** — pure ctypes DRM, off-target tests green; first on-Pi run is the phase-0 session |
+| Appliance mode | `contrib/picam2hdmi-pattern.service`: power on, it streams |
+| Picamera2 raw capture (zero-copy dmabuf path) | next — design in `capture.py` |
+
+## Usage today
+
+```bash
+pip install picam2hdmi          # numpy only; add [pi] on the Pi itself
+picam2hdmi pattern --mode counting --width 2028 --height 1078 --out frame.npy
+```
+
+That file is bit-for-bit what the HDMI link will carry — receivers can be
+built and tested against it before any cable exists.
+
+## The one integration rule
+
+The link must deliver bytes unmodified: **full-range RGB, no scaling, no
+overscan, RGB 4:4:4**. The most common failure is a limited-range clamp
+(16–235) quietly destroying sample values; the `checker` and `corners`
+patterns exist to catch exactly that on day one. Details and the receiver
+rate rule are in [PROTOCOL.md](PROTOCOL.md).
+
+## Why this exists
+
+Built as the sensor front-end for FPGA image pipelines — for example, as the
+input to hardware generated with [np2hw](https://github.com/lanserge/np2hw)
+— but useful to anyone who wants real sensor data into a board without
+MIPI hardware, deserialisers, or per-sensor bring-up.
+
+## Licence
+
+MIT.
