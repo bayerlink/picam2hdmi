@@ -223,10 +223,17 @@ class Card:
         """
         res = CardRes()
         self._ioctl(IOCTL_GETRESOURCES, res)
-        connector_ids = (u32 * res.count_connectors)()
-        crtc_ids = (u32 * res.count_crtcs)()
+        connector_ids = (u32 * max(1, res.count_connectors))()
+        crtc_ids = (u32 * max(1, res.count_crtcs))()
         res.connector_id_ptr = ctypes.addressof(connector_ids)
         res.crtc_id_ptr = ctypes.addressof(crtc_ids)
+        # The kernel writes through EVERY pointer whose count is nonzero --
+        # fbcon guarantees at least one framebuffer on a real device, so the
+        # categories this caller does not want must say count 0, exactly as
+        # _get_connector already does for encoders. A NULL pointer with a
+        # nonzero count is EFAULT on hardware and silence in a fake.
+        res.count_fbs = 0
+        res.count_encoders = 0
         self._ioctl(IOCTL_GETRESOURCES, res)
 
         chosen = None
