@@ -12,6 +12,11 @@ from bayerlink import (  # noqa: F401  (re-exported for convenience)
     pattern,
 )
 
-__version__ = "0.1.0"
+# The one version statement is pyproject.toml; this reads it.
+from importlib.metadata import version as _version
+try:
+    __version__ = _version("picam2hdmi")
+except Exception:
+    __version__ = "unknown"
 
 __all__ = ["Header", "encode_frame", "decode_frame", "pattern"]

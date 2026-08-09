@@ -66,11 +66,13 @@ def test_patch_frame_seq_restamps_header_and_crc_only():
     header, decoded = decode_frame(container)            # CRC must still pass
     assert header.frame_seq == 77
     assert np.array_equal(decoded, raw)
-    # Nothing outside the 32 header bytes moved.
+    # Nothing outside the header bytes moved -- the size is the library's
+    # statement, not a constant restated here to go stale with it.
+    from bayerlink.protocol import HEADER_BYTES
     flat_a = before.reshape(8, -1)
     flat_b = container.reshape(8, -1)
     assert np.array_equal(flat_a[1:], flat_b[1:])
-    assert np.array_equal(flat_a[0, 32:], flat_b[0, 32:])
+    assert np.array_equal(flat_a[0, HEADER_BYTES:], flat_b[0, HEADER_BYTES:])
 
 
 def _mode(w, h, hz, preferred=False):
