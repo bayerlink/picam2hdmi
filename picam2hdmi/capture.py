@@ -127,8 +127,16 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
 
     picam2 = Picamera2()
     size = tuple(mode) if mode else (1296, 972)
+    controls = {"AeEnable": False, "AwbEnable": False}
+    if exposure_us is not None:
+        controls["ExposureTime"] = int(exposure_us)
+    if analogue_gain is not None:
+        controls["AnalogueGain"] = float(analogue_gain)
+    # Controls ride in the CONFIGURATION, not set after start: the very
+    # first frame obeys them, which is what deterministic means.
     config = picam2.create_video_configuration(raw={"size": size},
-                                               buffer_count=4)
+                                               buffer_count=4,
+                                               controls=controls)
     picam2.configure(config)
     raw_config = picam2.camera_configuration()["raw"]
     fmt = raw_config["format"]
@@ -143,12 +151,6 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     target = _tunnel.inner_display(*display) if luma_tunnel else display
     check_rate(w, display)
 
-    controls = {"AeEnable": False, "AwbEnable": False}
-    if exposure_us is not None:
-        controls["ExposureTime"] = int(exposure_us)
-    if analogue_gain is not None:
-        controls["AnalogueGain"] = float(analogue_gain)
-    picam2.set_controls(controls)
     picam2.start()
     print(f"camera: {fmt} {sensor_w}x{sensor_h}, window {w}x{h}+{x}+{y}, "
           f"AE/AWB off"
