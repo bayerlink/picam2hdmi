@@ -187,3 +187,49 @@ def test_crop_only_change_retargets_the_running_camera(instrument):
     # Anything beyond geometry (gain here) is a real restart path.
     assert not supervisor._crop_only_change(dict(spec, gain=4.0))
     supervisor._thread = None             # hand the fake back untouched
+
+
+def test_state_retention_and_restore(instrument):
+    supervisor, port = instrument
+    spec = {"source": "pattern", "pattern": "gradient",
+            "width": 16, "height": 4, "bayer": "GBRG"}
+    code, _ = _request(port, "PUT", "/source", spec)
+    assert code == 200
+
+    # The accepted spec survives in the spool, invisible to /recordings.
+    stored = supervisor.stored_spec()
+    assert stored["pattern"] == "gradient" and "mode" in stored
+    code, body = _request(port, "GET", "/recordings")
+    assert body["recordings"] == []
+
+    # A fresh supervisor over the same spool restores it -- the boot path.
+    twin = Supervisor(supervisor.spool, "64x16@30", runner=_fake_runner)
+    assert twin.stored_spec()["pattern"] == "gradient"
+
+    # 'off' is a retained state too: an instrument switched off stays off.
+    code, _ = _request(port, "PUT", "/source", {"source": "off"})
+    assert code == 200
+    assert supervisor.stored_spec() is None or \
+        supervisor.stored_spec()["source"] == "off"
+
+
+def test_power_button(instrument, tmp_path, monkeypatch):
+    import time
+
+    from picam2hdmi import serve as serve_module
+
+    supervisor, port = instrument
+    halted = tmp_path / "halted"
+    monkeypatch.setattr(serve_module, "POWEROFF", ("touch", str(halted)))
+
+    # Anything but {"off": true} is refused -- power is not a default.
+    code, body = _request(port, "PUT", "/power", {})
+    assert code == 400 and "off" in body["error"]
+    assert not halted.exists()
+
+    code, body = _request(port, "PUT", "/power", {"off": True})
+    assert code == 200 and body["powering_off"] is True
+    deadline = time.monotonic() + 5
+    while not halted.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert halted.exists()

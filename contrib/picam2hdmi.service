@@ -11,6 +11,10 @@
 #
 # A LAN instrument, not an internet service: it binds 0.0.0.0 so the
 # bench can reach it -- firewall the port if the LAN is not yours.
+#
+# State is retained: the last accepted source is restored at boot, so a
+# Pi configured once as a camera source IS a camera from power-on. The
+# panel's Power off button (PUT /power) shuts the Pi down cleanly.
 # Needs a KMS-capable stack (Pi OS Lite, vc4-kms-v3d) and NO desktop
 # session owning the display.
 [Unit]

@@ -104,6 +104,12 @@ curl -X PUT http://picam.local:8080/source \
 A LAN instrument, not an internet service: it binds 0.0.0.0 and has no
 authentication — firewall the port if the LAN is not yours.
 
+The instrument **retains state**: the last accepted source survives a
+power cycle, so configure the camera once in the panel and from then on
+the Pi boots straight into it — a camera with a power plug. The panel's
+**Power off** button shuts the Pi down cleanly (SD cards prefer that to
+pulled plugs); switching power back on brings everything back.
+
 ## 5. If something misbehaves
 
 - **`main.py: DRM master` / modeset errors** — a desktop session owns

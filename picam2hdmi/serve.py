@@ -13,6 +13,13 @@ SCPI. This daemon owns the scanout and listens for three things:
     PUT  /recordings/<name>   upload a recording (.npy of containers)
     GET  /recordings/<name>   download it back, byte-identical
     DELETE /recordings/<name> remove it
+    PUT  /power               {"off": true} -> clean shutdown; instruments
+                              have power buttons, and SD cards prefer them
+
+Like a bench instrument, it RETAINS STATE: every accepted source spec
+is persisted in the spool, and (unless --no-autostart) the daemon boots
+straight back into the last one -- configure the camera once in the
+panel and the Pi is a camera with a power plug from then on.
 
 With that, a test rig ORCHESTRATES the physical bench: set a pattern,
 capture on the receiving side, judge with bayertap, switch format,
@@ -35,6 +42,11 @@ from pathlib import Path
 
 class _Stop(Exception):
     """Raised inside the scanout loop when the supervisor wants it back."""
+
+
+# What the power button runs. A tuple so tests can point it at something
+# harmless without touching the handler.
+POWEROFF = ("systemctl", "poweroff")
 
 
 def _png_gray(img) -> bytes:
@@ -129,6 +141,7 @@ class Supervisor:
             self.stop()
             self.spec = {"source": "off"}
             self.preview_container = None
+            self._persist()
             return
         mode_text = spec.get("mode", self.default_mode)
         mode = _parse_mode(mode_text)
@@ -228,6 +241,23 @@ class Supervisor:
         self._thread = threading.Thread(
             target=self._run, args=(frames, mode), daemon=True)
         self._thread.start()
+        self._persist()
+
+    def _persist(self) -> None:
+        """State retention, best-effort: streaming is the job, not this."""
+        try:
+            (self.spool / "last-source.json").write_text(
+                json.dumps(self.spec))
+        except OSError:
+            pass
+
+    def stored_spec(self) -> dict | None:
+        """The spec the instrument was last set to, if one survives."""
+        try:
+            spec = json.loads((self.spool / "last-source.json").read_text())
+        except (OSError, ValueError):
+            return None
+        return spec if isinstance(spec, dict) and spec.get("source") else None
 
     def _crop_only_change(self, spec: dict) -> bool:
         """True when a camera is streaming and only the window differs."""
@@ -276,6 +306,7 @@ class Supervisor:
         ref["crop"] = window
         self.spec = dict(spec, mode=mode_text)
         self.last_error = None
+        self._persist()
 
     def stop(self) -> None:
         self._camera_ref = None
@@ -396,6 +427,23 @@ def _handler(supervisor: Supervisor):
 
         def do_PUT(self):
             length = int(self.headers.get("Content-Length", 0))
+            if self.path == "/power":
+                try:
+                    spec = json.loads(self.rfile.read(length) or b"{}")
+                except ValueError as error:
+                    return self._send(400, {"error": str(error)})
+                if spec.get("off") is not True:
+                    return self._send(400, {"error":
+                                            'PUT /power takes {"off": true}; '
+                                            "nothing else is a power action"})
+
+                def _off():
+                    import subprocess
+                    subprocess.run(list(POWEROFF), check=False)
+                # Answer first, act second: the reply must leave the wire
+                # before the network interface goes down with the OS.
+                threading.Timer(1.0, _off).start()
+                return self._send(200, {"powering_off": True})
             if self.path == "/source":
                 try:
                     spec = json.loads(self.rfile.read(length) or b"{}")
@@ -425,10 +473,17 @@ def _handler(supervisor: Supervisor):
 def serve(bind: str, port: int, supervisor: Supervisor,
           autostart: dict | None = None) -> None:
     if autostart:
-        try:
-            supervisor.start(autostart)
-        except Exception as error:            # noqa: BLE001
-            supervisor.last_error = f"autostart: {error}"
+        # An appliance boots into its source. Early boot is exactly when
+        # a camera may not be ready yet, so the one retry-loop in the
+        # codebase lives here -- and gives up into a running, idle,
+        # controllable daemon with the reason in last_error.
+        for attempt in range(3):
+            try:
+                supervisor.start(autostart)
+                break
+            except Exception as error:        # noqa: BLE001
+                supervisor.last_error = f"autostart: {error}"
+                time.sleep(2)
     server = ThreadingHTTPServer((bind, port), _handler(supervisor))
     print(f"picam2hdmi instrument on http://{bind}:{port} "
           f"(spool: {supervisor.spool})")

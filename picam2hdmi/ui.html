@@ -13,6 +13,7 @@
          background: #57606a; align-self: center; }
   #led.on { background: #3fb950; } #led.err { background: #f85149; }
   #facts { color: #8b949e; font-variant-numeric: tabular-nums; }
+  #pwr { margin-left: auto; }
   #err { color: #f85149; min-height: 1.3em; margin: .5rem 0;
          white-space: pre-wrap; }
   main { max-width: 64rem; }
@@ -86,6 +87,7 @@
   <span id="led"></span>
   <h1>picam2hdmi</h1>
   <span id="facts">connecting…</span>
+  <button id="pwr" class="warn" title="clean shutdown of the Pi">Power off</button>
 </header>
 <div id="err"></div>
 
@@ -495,6 +497,14 @@ drop.addEventListener('drop', e => { e.preventDefault();
   for (const f of e.dataTransfer.files) upload(f); });
 $('file').addEventListener('change',
   e => { for (const f of e.target.files) upload(f); });
+
+$('pwr').onclick = () => {
+  if (!confirm('Power off the instrument? (clean shutdown; ' +
+               'the last source is restored on next boot)')) return;
+  api('PUT', '/power', {off: true})
+    .then(() => err('powering off — the panel goes dark in a few seconds'))
+    .catch(e => err(e.message));
+};
 
 drawCrop();
 refresh();

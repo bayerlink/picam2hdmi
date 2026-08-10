@@ -45,7 +45,7 @@ print(header.bayer_order, header.width, header.height, header.frame_seq)
 | CLI: pattern → container file | **done** |
 | KMS scanout (double-buffered, full-range RGB forced) | **working** — pure ctypes DRM, proven on the bench |
 | Picamera2 raw capture | **working** — the sensor's packed bytes ride to the wire verbatim; crop, fixed exposure/gain, every libcamera camera unseen |
-| Instrument mode | **working** — `picam2hdmi serve`: HTTP control, recordings spool, a control panel with a live viewfinder crop editor (`contrib/picam2hdmi.service` for power-on) |
+| Instrument mode | **working** — `picam2hdmi serve`: HTTP control, recordings spool, a control panel with a live viewfinder crop editor and a power button; the last source is restored at boot (`contrib/picam2hdmi.service`) |
 
 ## Usage
 

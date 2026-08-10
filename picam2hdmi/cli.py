@@ -88,8 +88,8 @@ def main(argv=None) -> int:
     daemon.add_argument("--connector", type=int, default=None)
     daemon.add_argument("--card", default=None)
     daemon.add_argument("--no-autostart", action="store_true",
-                        help="start idle instead of streaming the default "
-                             "pattern at boot")
+                        help="start idle instead of restoring the last "
+                             "source (or streaming the default pattern)")
 
     args = parser.parse_args(argv)
 
@@ -118,9 +118,13 @@ def main(argv=None) -> int:
         supervisor = Supervisor(args.spool, args.mode,
                                 connector=args.connector,
                                 card_path=args.card)
-        autostart = None if args.no_autostart else {
-            "source": "pattern", "pattern": "counting",
-            "width": 512, "height": 240, "bayer": "RGGB"}
+        # Boot into the last configured source -- an instrument retains
+        # its state across power cycles -- or the default pattern on a
+        # fresh spool.
+        autostart = None if args.no_autostart else (
+            supervisor.stored_spec() or {
+                "source": "pattern", "pattern": "counting",
+                "width": 512, "height": 240, "bayer": "RGGB"})
         serve(args.bind, args.port, supervisor, autostart=autostart)
         return 0
 
