@@ -106,13 +106,18 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
            crop: tuple[int, int, int, int] | None = None,
            exposure_us: int | None = None,
            analogue_gain: float | None = None,
-           luma_tunnel: bool = False, flags: int = 0):
+           luma_tunnel: bool = False, flags: int = 0, peek=None):
     """An endless container source from the camera. Runs on the Pi.
 
     Yields scanout-shaped frames exactly like the pattern and file
     sources. ``mode`` picks the sensor's raw mode (default 1296x972, the
     OV5647's 2x2-binned mode and the largest of its modes that meets
     1080p's rate rule); ``crop`` selects a window of it.
+
+    ``peek``, if given, is called every 15th frame with
+    ``(full_rows, order, bits)`` -- the WHOLE sensor's packed lines,
+    before any crop. It exists so a control surface can show the full
+    view a crop is being aimed within; it never touches the wire path.
     """
     try:
         from picamera2 import Picamera2
@@ -166,6 +171,8 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
             buffer = picam2.capture_array("raw")
             # The buffer is (rows, stride) uint8; the stride carries
             # padding beyond the packed line; vertical crop is row slicing.
+            if peek is not None and sequence % 15 == 0:
+                peek(buffer[:, :line_bytes], order, bits)
             rows = buffer[y:y + h, :line_bytes]
             window = crop_packed(rows, x, w, bits) if (x or w != sensor_w) \
                 else rows
