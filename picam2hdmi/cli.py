@@ -54,6 +54,18 @@ def main(argv=None) -> int:
                         choices=sorted(protocol.BAYER_PHASE))
     stream.add_argument("--mode", default="1920x1080@30",
                         help="required display mode WxH@Hz, or 'preferred'")
+    stream.add_argument("--cam-mode", default=None,
+                        help="sensor raw mode WxH for --source camera "
+                             "(default 1296x972, the binned mode)")
+    stream.add_argument("--crop", default=None,
+                        help="sensor window x,y,w,h for --source camera -- "
+                             "how a big sensor meets the link budget, and "
+                             "how a small window fits the luma tunnel")
+    stream.add_argument("--exposure-us", type=int, default=None,
+                        help="fixed exposure for --source camera (AE is "
+                             "off by default: a raw source is deterministic)")
+    stream.add_argument("--gain", type=float, default=None,
+                        help="fixed analogue gain for --source camera")
     stream.add_argument("--connector", type=int, default=None)
     stream.add_argument("--card", default=None, help="/dev/dri/cardN override")
     stream.add_argument("--luma-tunnel", action="store_true",
@@ -123,15 +135,25 @@ def main(argv=None) -> int:
             width, _, height = size.partition("x")
             want = (int(width), int(height), int(hz or 60))
             display = (want[0], want[1])
+        if display is None:
+            parser.error("a source must be encoded for a known geometry, "
+                         "so require the mode explicitly "
+                         "(e.g. --mode 1920x1080@30)")
         if args.source == "camera":
             from . import capture
-            capture.frames()    # states its own status precisely
-            return 1
-        if display is None:
-            parser.error("--mode preferred needs --source camera; a pattern "
-                         "must be encoded for a known geometry, so require "
-                         "the mode explicitly (e.g. --mode 1920x1080@30)")
-        if args.source == "file":
+
+            cam_mode = None
+            if args.cam_mode:
+                w, _, h = args.cam_mode.partition("x")
+                cam_mode = (int(w), int(h))
+            crop = None
+            if args.crop:
+                crop = tuple(int(v) for v in args.crop.split(","))
+            frames = capture.frames(display, mode=cam_mode, crop=crop,
+                                    exposure_us=args.exposure_us,
+                                    analogue_gain=args.gain,
+                                    luma_tunnel=args.luma_tunnel)
+        elif args.source == "file":
             if not args.file:
                 parser.error("--source file needs --file <recording.npy>")
             frames = output.file_frames(args.file, display,

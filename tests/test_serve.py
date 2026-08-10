@@ -69,6 +69,8 @@ def test_a_bad_spec_is_a_400_with_the_reason(instrument):
     assert code == 400
     assert "display line carries" in body["error"]
     code, body = _request(port, "PUT", "/source", {"source": "camera"})
+    assert code == 400 and "Picamera2" in body["error"]
+    code, body = _request(port, "PUT", "/source", {"source": "webcam"})
     assert code == 400 and "not one of" in body["error"]
 
 

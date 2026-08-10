@@ -68,6 +68,25 @@
     <button onclick="setSource({source:'off'})">Off</button>
   </section>
 
+  <section id="card-camera">
+    <h2>Camera source</h2>
+    <label>sensor mode <select id="cmode">
+      <option value="1296x972">1296x972 (binned)</option>
+      <option value="2592x1944">2592x1944 (full, needs crop)</option>
+      <option value="640x480">640x480</option></select></label>
+    <label><input id="ctun" type="checkbox"> luma tunnel</label>
+    <br>
+    <label>crop x <input id="cx" type="number" step="4" placeholder="none"></label>
+    <label>y <input id="cy" type="number" step="2"></label>
+    <label>w <input id="cw" type="number" step="4"></label>
+    <label>h <input id="ch" type="number" step="2"></label>
+    <br>
+    <label>exposure µs <input id="cexp" type="number" placeholder="auto-fixed"></label>
+    <label>gain <input id="cgain" type="number" step="0.1"></label>
+    <br>
+    <button class="go" onclick="applyCamera()">Stream camera</button>
+  </section>
+
   <section id="card-preview">
     <h2>Emitting now</h2>
     <img id="preview" alt="nothing streaming">
@@ -103,6 +122,22 @@ function setSource(spec) {
   api('PUT', '/source', spec).then(refresh).catch(e => err(e.message));
 }
 
+function applyCamera() {
+  const spec = {source: 'camera',
+    cam_mode: document.getElementById('cmode').value.split('x').map(Number),
+    luma_tunnel: document.getElementById('ctun').checked};
+  const cx = document.getElementById('cx').value;
+  if (cx !== '') {
+    spec.crop = ['cx', 'cy', 'cw', 'ch']
+      .map(id => +document.getElementById(id).value);
+  }
+  const exp = document.getElementById('cexp').value;
+  if (exp !== '') spec.exposure_us = +exp;
+  const gain = document.getElementById('cgain').value;
+  if (gain !== '') spec.gain = +gain;
+  setSource(spec);
+}
+
 function applyPattern() {
   setSource({source: 'pattern',
     pattern: document.getElementById('pat').value,
@@ -128,14 +163,19 @@ async function refresh() {
   if (s.last_error) err(s.last_error);
   document.getElementById('card-pattern').classList
     .toggle('active', s.running && src.source === 'pattern');
+  document.getElementById('card-camera').classList
+    .toggle('active', s.running && src.source === 'camera');
 
   const specNow = JSON.stringify(src) + s.running;
-  if (specNow !== lastSpec) {           // reload preview only on change
+  const live = s.running && src.source === 'camera';
+  if (specNow !== lastSpec || live) {   // cameras move; patterns do not
     lastSpec = specNow;
     const img = document.getElementById('preview');
     img.src = s.running ? '/preview.png?' + Date.now() : '';
     document.getElementById('previewcap').textContent = s.running ?
-      'decoded raw samples of the emitted container' : 'nothing streaming';
+      (live ? 'live camera raw (refreshes with this page)'
+        : 'decoded raw samples of the emitted container')
+      : 'nothing streaming';
   }
   renderSpool(s.spool, src.file);
 }

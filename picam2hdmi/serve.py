@@ -161,9 +161,33 @@ class Supervisor:
             import numpy as np
             stack = np.load(path, mmap_mode="r")
             preview = np.array(stack[0] if stack.ndim == 4 else stack)
+        elif source == "camera":
+            from . import capture
+
+            cam_mode = spec.get("cam_mode")
+            crop = spec.get("crop")
+            frames = capture.frames(
+                display,
+                mode=tuple(int(v) for v in cam_mode) if cam_mode else None,
+                crop=tuple(int(v) for v in crop) if crop else None,
+                exposure_us=spec.get("exposure_us"),
+                analogue_gain=spec.get("gain"),
+                luma_tunnel=tunnel)
+            first = next(frames)
+            preview = first
+            # A camera moves; its preview should too. Stash every 30th
+            # container so the panel's poll shows a moving image.
+            supervisor = self
+
+            def _peeking(source_frames):
+                for index, frame in enumerate(source_frames):
+                    if index % 30 == 0 and not tunnel:
+                        supervisor.preview_container = frame
+                    yield frame
+            frames = _peeking(_chain(first, frames))
         else:
             raise ValueError(f"source {source!r} is not one of "
-                             "'pattern', 'file', 'off'")
+                             "'pattern', 'file', 'camera', 'off'")
 
         # For a tunnel source the scanout frame is the grey wrap; the
         # preview shows the CONTENT -- the inner container -- because an
