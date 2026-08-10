@@ -328,8 +328,12 @@ def _handler(supervisor: Supervisor):
                 try:
                     spec = json.loads(self.rfile.read(length) or b"{}")
                     supervisor.start(spec)
-                except (ValueError, KeyError) as error:
-                    return self._send(400, {"error": str(error)})
+                except Exception as error:   # noqa: BLE001 -- named, not dropped
+                    # Whatever went wrong belongs in the response: an
+                    # instrument that answers with a closed connection
+                    # turns a missing dependency into a mystery.
+                    return self._send(400, {
+                        "error": f"{type(error).__name__}: {error}"})
                 return self._send(200, supervisor.status())
             if self.path.startswith("/recordings/"):
                 name = self.path[len("/recordings/"):]
