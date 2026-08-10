@@ -38,7 +38,14 @@ def main(argv=None) -> int:
     stream = sub.add_parser(
         "stream", help="scan out over HDMI (runs on the Pi)")
     stream.add_argument("--source", default="pattern",
-                        choices=["pattern", "camera"])
+                        choices=["pattern", "camera", "file"])
+    stream.add_argument("--file", default=None,
+                        help="a recording to replay (.npy of containers, "
+                             "as bayertap save writes) -- loops forever, "
+                             "re-stamping frame_seq like a live source")
+    stream.add_argument("--no-restamp", action="store_true",
+                        help="preserve recorded frame_seq values (a "
+                             "receiver will see each loop as repeats)")
     stream.add_argument("--pattern", default="counting",
                         choices=sorted(pattern.PATTERNS))
     stream.add_argument("--width", type=int, default=2028)
@@ -94,9 +101,16 @@ def main(argv=None) -> int:
             parser.error("--mode preferred needs --source camera; a pattern "
                          "must be encoded for a known geometry, so require "
                          "the mode explicitly (e.g. --mode 1920x1080@30)")
-        frames = output.pattern_frames(args.pattern, args.width, args.height,
-                                       args.bayer, display,
-                                       luma_tunnel=args.luma_tunnel)
+        if args.source == "file":
+            if not args.file:
+                parser.error("--source file needs --file <recording.npy>")
+            frames = output.file_frames(args.file, display,
+                                        luma_tunnel=args.luma_tunnel,
+                                        restamp=not args.no_restamp)
+        else:
+            frames = output.pattern_frames(args.pattern, args.width,
+                                           args.height, args.bayer, display,
+                                           luma_tunnel=args.luma_tunnel)
         try:
             output.stream(frames, mode=want, connector=args.connector,
                           card_path=args.card,

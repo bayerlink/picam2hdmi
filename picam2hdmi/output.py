@@ -116,7 +116,7 @@ def pattern_frames(mode_name: str, cam_width: int, cam_height: int,
     path (a cheap YUY2 dongle) still recovers the bytes exactly. The
     container underneath is unchanged -- it is encoded for the tunnel's
     smaller virtual display, and the receiver hands the recovered container
-    to the same decode_frame() as ever. Costs 6x capacity; a conformance
+    to the same decode_frame() as ever. Costs 40x capacity; a conformance
     bench does not care.
     """
     from bayerlink import encode_frame, pattern
@@ -142,3 +142,57 @@ def pattern_frames(mode_name: str, cam_width: int, cam_height: int,
         patch_frame_seq(container, sequence)
         yield container
         sequence += 1
+
+
+def file_frames(path, display: tuple[int, int], luma_tunnel: bool = False,
+                restamp: bool = True):
+    """An endless container source from a RECORDING -- replay as scanout.
+
+    ``path`` is a .npy of containers: one (h, w, 3) frame or a stack
+    (n, h, w, 3), as ``bayertap save`` records them. The stack loops
+    forever, so a session recorded once becomes a deterministic,
+    repeatable source -- real sensor data into a receiver with no camera
+    attached.
+
+    ``restamp`` (the default) rewrites frame_seq monotonically across
+    loops, exactly as a live source would count: receivers deduplicate by
+    sequence, and a looping replay whose numbers repeat would look like
+    one stuck frame. ``restamp=False`` preserves the recorded sequence
+    numbers for forensics, accepting that a receiver sees the loop as
+    repeats.
+    """
+    import numpy as np
+
+    stack = np.load(path, mmap_mode="r")
+    if stack.ndim == 3:
+        stack = stack[None]
+    if stack.ndim != 4 or stack.shape[-1] != 3:
+        raise ValueError(
+            f"{path}: expected containers (h, w, 3) or a stack "
+            f"(n, h, w, 3), got {stack.shape}")
+
+    if luma_tunnel:
+        from bayerlink import tunnel
+        inner = tunnel.inner_display(*display)
+        if stack.shape[2] != inner[0]:
+            raise ValueError(
+                f"{path}: containers are {stack.shape[2]} wide but the "
+                f"{display} tunnel carries {inner[0]}; record and replay "
+                "must agree on the tunnel geometry")
+    elif (stack.shape[2], ) != (display[0], ):
+        raise ValueError(
+            f"{path}: containers are {stack.shape[2]} wide but the display "
+            f"is {display[0]}; a container IS its display's memory image")
+
+    sequence = 0
+    while True:
+        for frame in stack:
+            container = np.array(frame)          # writable copy off the mmap
+            if restamp:
+                patch_frame_seq(container, sequence)
+            if luma_tunnel:
+                from bayerlink import tunnel
+                yield tunnel.encode(container, display)
+            else:
+                yield container
+            sequence += 1

@@ -96,12 +96,12 @@ def test_pattern_frames_through_the_luma_tunnel_round_trip():
     from bayerlink import tunnel
     from picam2hdmi.output import pattern_frames
 
-    display = (192, 40)
+    display = (680, 40)
     frames = pattern_frames("corners", 32, 8, "RGGB", display,
                             luma_tunnel=True)
     grey0 = next(frames)
     grey1 = next(frames)
-    assert grey0.shape == (40, 192, 3)
+    assert grey0.shape == (40, 680, 3)
     assert (grey0[:, :, 0] == grey0[:, :, 1]).all()
 
     inner_w, inner_h = tunnel.inner_display(*display)
@@ -110,3 +110,41 @@ def test_pattern_frames_through_the_luma_tunnel_round_trip():
         header, raw = decode_frame(container)
         assert header.frame_seq == index
         assert np.array_equal(raw, pattern.generate("corners", 32, 8))
+
+
+def test_file_frames_replays_a_recording_and_restamps(tmp_path):
+    """A recorded stack loops forever with live-source sequence numbers."""
+    import numpy as np
+    from bayerlink import encode_frame, pattern
+    from picam2hdmi.output import file_frames
+    from bayerlink.protocol import Header, HEADER_BYTES
+
+    display = (32, 12)
+    raws = [pattern.generate("counting", 16, 4),
+            pattern.generate("checker", 16, 4)]
+    stack = np.stack([encode_frame(r, "RGGB", frame_seq=77, display=display)
+                      for r in raws])
+    path = tmp_path / "rec.npy"
+    np.save(path, stack)
+
+    frames = file_frames(str(path), display)
+    seen = [next(frames) for _ in range(5)]      # loops past the end
+    for i, frame in enumerate(seen):
+        line0 = frame.reshape(display[1], display[0] * 3)[0]
+        header = Header.unpack(line0[:HEADER_BYTES].tobytes())
+        assert header.frame_seq == i             # restamped, not 77
+        assert np.array_equal(frame[1:], stack[i % 2][1:])
+
+
+def test_file_frames_refuses_mismatched_geometry(tmp_path):
+    import numpy as np
+    import pytest
+    from bayerlink import encode_frame, pattern
+    from picam2hdmi.output import file_frames
+
+    frame = encode_frame(pattern.generate("counting", 16, 4), "RGGB",
+                         frame_seq=0, display=(32, 12))
+    path = tmp_path / "rec.npy"
+    np.save(path, frame)
+    with pytest.raises(ValueError, match="display is 64"):
+        next(file_frames(str(path), (64, 12)))
