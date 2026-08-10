@@ -88,9 +88,14 @@ MIPI hardware, deserialisers, or per-sensor bring-up.
 Developed independently; recurring support via
 [github.com/sponsors/lanserge](https://github.com/sponsors/lanserge), or write
 first: **s.rabykin@gmail.com**. Sponsorable capability targets carry the
-`sponsorable` label on the issue tracker — currently
-[Pi 5 camera support](https://github.com/bayerlink/picam2hdmi/issues/1)
-(the RP1's 16-bit raw, carried verbatim). Scope is agreed in writing before
+`sponsorable` label on the issue tracker —
+[Pi 5 camera support](https://github.com/bayerlink/picam2hdmi/issues/1), and
+**adopt a sensor**: a one-time sponsorship puts a module on the bench and its
+verified data pack in the library, with your name on the release
+([IMX477](https://github.com/bayerlink/picam2hdmi/issues/2),
+[IMX296 GS](https://github.com/bayerlink/picam2hdmi/issues/3),
+[IMX708](https://github.com/bayerlink/picam2hdmi/issues/4),
+[IMX219](https://github.com/bayerlink/picam2hdmi/issues/5)). Scope is agreed in writing before
 work starts; sponsored work lands in the open tree immediately, MIT like
 everything else — sponsorship buys ordering and named credit, not
 exclusivity.
