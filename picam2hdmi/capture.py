@@ -114,10 +114,10 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     OV5647's 2x2-binned mode and the largest of its modes that meets
     1080p's rate rule); ``crop`` selects a window of it.
 
-    ``peek``, if given, is called every 15th frame with
-    ``(full_rows, order, bits)`` -- the WHOLE sensor's packed lines,
-    before any crop. It exists so a control surface can show the full
-    view a crop is being aimed within; it never touches the wire path.
+    ``peek``, if given, receives every 15th emitted container BEFORE
+    any tunnel wrap -- the content, so a control surface can show what
+    the crop is selecting even when the wire carries the tunnel's grey.
+    It never touches the wire path.
     """
     try:
         from picamera2 import Picamera2
@@ -171,14 +171,14 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
             buffer = picam2.capture_array("raw")
             # The buffer is (rows, stride) uint8; the stride carries
             # padding beyond the packed line; vertical crop is row slicing.
-            if peek is not None and sequence % 15 == 0:
-                peek(buffer[:, :line_bytes], order, bits)
             rows = buffer[y:y + h, :line_bytes]
             window = crop_packed(rows, x, w, bits) if (x or w != sensor_w) \
                 else rows
             container = encode_packed(np.ascontiguousarray(window), order,
                                       frame_seq=sequence, bits=bits,
                                       display=target, flags=flags)
+            if peek is not None and sequence % 15 == 0:
+                peek(container)
             yield _tunnel.encode(container, display) if luma_tunnel \
                 else container
             sequence += 1

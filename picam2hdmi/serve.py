@@ -6,10 +6,9 @@ SCPI. This daemon owns the scanout and listens for three things:
     GET  /                    the panel: a phone-friendly control page
     GET  /status              what is streaming, and how it is going
     PUT  /source              switch source: pattern, a recording, or off
-    GET  /preview.png         what is being EMITTED, as an image -- add
-                              ?recording=<name> to look inside the spool,
-                              ?sensor=1 for the camera's FULL view (the
-                              window a crop is aimed within)
+    GET  /preview.png         what is being EMITTED, as an image (for a
+                              tunnel source, the inner content) -- add
+                              ?recording=<name> to look inside the spool
     GET  /recordings          list the spool
     PUT  /recordings/<name>   upload a recording (.npy of containers)
     GET  /recordings/<name>   download it back, byte-identical
@@ -71,27 +70,6 @@ def _container_preview(container) -> bytes:
     return _png_gray(shown)
 
 
-def _sensor_png(rows, bits: int, step: int = 2) -> bytes:
-    """The camera's full view as a grayscale PNG, without unpacking.
-
-    At CSI-2 packing the first group_samples bytes of every group ARE
-    the samples' top 8 bits (16-bit is little-endian pairs), so a
-    preview is byte selection, decimation, PNG -- cheap enough for a
-    Pi 3B to answer a panel's poll."""
-    import numpy as np
-    from bayerlink.protocol import _GROUP
-
-    rows = np.asarray(rows)
-    if bits == 16:
-        high = rows.reshape(rows.shape[0], -1, 2)[:, :, 1]
-    else:
-        group_samples, group_bytes = _GROUP[bits]
-        high = rows.reshape(rows.shape[0], -1,
-                            group_bytes)[:, :, :group_samples]
-        high = high.reshape(rows.shape[0], -1)
-    return _png_gray(np.ascontiguousarray(high[::step, ::step]))
-
-
 def _parse_mode(text: str) -> tuple[int, int, int]:
     size, _, hz = text.partition("@")
     width, _, height = size.partition("x")
@@ -120,7 +98,6 @@ class Supervisor:
         self.spec = {"source": "off"}
         self.last_error = None
         self.preview_container = None
-        self.sensor_view = None       # (packed rows, bits) of the full sensor
 
     # -- facts ---------------------------------------------------------------
 
@@ -151,7 +128,6 @@ class Supervisor:
             self.stop()
             self.spec = {"source": "off"}
             self.preview_container = None
-            self.sensor_view = None
             return
         mode_text = spec.get("mode", self.default_mode)
         mode = _parse_mode(mode_text)
@@ -198,8 +174,12 @@ class Supervisor:
             crop = spec.get("crop")
             supervisor = self
 
-            def _stash_sensor(rows, order, bits):
-                supervisor.sensor_view = (rows, bits)
+            # A camera moves; its preview should too. The capture path
+            # peeks every 15th container BEFORE the tunnel wrap, so the
+            # panel's poll shows the moving window even when the wire
+            # carries the tunnel's grey.
+            def _stash(container):
+                supervisor.preview_container = container
 
             frames = capture.frames(
                 display,
@@ -207,18 +187,10 @@ class Supervisor:
                 crop=tuple(int(v) for v in crop) if crop else None,
                 exposure_us=spec.get("exposure_us"),
                 analogue_gain=spec.get("gain"),
-                luma_tunnel=tunnel, peek=_stash_sensor)
-            first = next(frames)
-            preview = first
-            # A camera moves; its preview should too. Stash every 30th
-            # container so the panel's poll shows a moving image.
-
-            def _peeking(source_frames):
-                for index, frame in enumerate(source_frames):
-                    if index % 30 == 0 and not tunnel:
-                        supervisor.preview_container = frame
-                    yield frame
-            frames = _peeking(_chain(first, frames))
+                luma_tunnel=tunnel, peek=_stash)
+            first = next(frames)          # frame 0 peeked during this pull
+            preview = self.preview_container
+            frames = _chain(first, frames)
         else:
             raise ValueError(f"source {source!r} is not one of "
                              "'pattern', 'file', 'camera', 'off'")
@@ -237,8 +209,6 @@ class Supervisor:
 
         self.stop()
         self.preview_container = preview
-        if source != "camera":
-            self.sensor_view = None   # a stale full view aims nothing
         self.spec = dict(spec, mode=mode_text)
         self.last_error = None
         self._stop.clear()
@@ -325,14 +295,6 @@ def _handler(supervisor: Supervisor):
                                         supervisor.status()["spool"]})
             if self.path.startswith("/preview.png"):
                 _, _, query = self.path.partition("?")
-                if query.startswith("sensor"):
-                    view = supervisor.sensor_view
-                    if view is None:
-                        return self._send(404,
-                                          {"error": "no camera streaming"})
-                    rows, bits = view
-                    return self._send_bytes(200, _sensor_png(rows, bits),
-                                            "image/png")
                 container = supervisor.preview_container
                 if query.startswith("recording="):
                     import numpy as np
