@@ -97,3 +97,50 @@ def test_traversal_names_are_refused(instrument):
     code, body = _request(port, "PUT", "/source",
                           {"source": "file", "file": "../../etc/passwd"})
     assert code == 400
+
+
+def test_panel_preview_download_delete(instrument, tmp_path):
+    supervisor, port = instrument
+    # the panel
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/")
+    response = conn.getresponse()
+    assert response.status == 200
+    assert b"picam2hdmi" in response.read()
+
+    # stream a pattern -> preview is a PNG of the decoded raw
+    code, _ = _request(port, "PUT", "/source", {
+        "source": "pattern", "pattern": "gradient",
+        "width": 16, "height": 4, "bayer": "RGGB"})
+    assert code == 200
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/preview.png")
+    response = conn.getresponse()
+    body = response.read()
+    assert response.status == 200 and body[:8] == b"\x89PNG\r\n\x1a\n"
+
+    # upload -> download round-trips byte-identical; preview reads inside
+    frame = encode_frame(pattern.generate("counting", 16, 4), "RGGB",
+                         frame_seq=5, display=(64, 16))
+    blob = tmp_path / "b.npy"
+    np.save(blob, frame)
+    payload = blob.read_bytes()
+    code, _ = _request(port, "PUT", "/recordings/keep.npy", payload)
+    assert code == 200
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/recordings/keep.npy")
+    response = conn.getresponse()
+    assert response.status == 200 and response.read() == payload
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/preview.png?recording=keep.npy")
+    response = conn.getresponse()
+    assert response.status == 200 and response.read()[:4] == b"\x89PNG"
+
+    # delete, with traversal refused
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("DELETE", "/recordings/..%2fkeep.npy")
+    assert conn.getresponse().status in (400, 404)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("DELETE", "/recordings/keep.npy")
+    assert conn.getresponse().status == 200
+    assert supervisor.status()["spool"] == []

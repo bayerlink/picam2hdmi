@@ -1,0 +1,190 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>picam2hdmi</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 1rem; background: #0d1117; color: #e6edf3;
+         font: 15px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  h1 { font-size: 1.1rem; margin: 0; letter-spacing: .04em; }
+  header { display: flex; gap: .8rem; align-items: baseline; flex-wrap: wrap;
+           border-bottom: 1px solid #30363d; padding-bottom: .7rem; }
+  #led { width: .7rem; height: .7rem; border-radius: 50%; display: inline-block;
+         background: #57606a; align-self: center; }
+  #led.on { background: #3fb950; } #led.err { background: #f85149; }
+  #facts { color: #8b949e; font-variant-numeric: tabular-nums; }
+  #err { color: #f85149; min-height: 1.3em; margin: .5rem 0;
+         white-space: pre-wrap; }
+  main { display: grid; gap: 1rem; grid-template-columns: 1fr; max-width: 64rem; }
+  @media (min-width: 54rem) { main { grid-template-columns: 1fr 1fr; } }
+  section { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+            padding: .9rem; }
+  section.active { border-color: #3fb950; }
+  section h2 { margin: 0 0 .6rem; font-size: .8rem; text-transform: uppercase;
+               letter-spacing: .09em; color: #8b949e; }
+  label { display: inline-flex; gap: .35rem; align-items: center;
+          margin: .15rem .6rem .15rem 0; color: #8b949e; }
+  input, select, button { background: #0d1117; color: #e6edf3;
+          border: 1px solid #30363d; border-radius: 6px; padding: .35rem .5rem;
+          font: inherit; }
+  input[type=number] { width: 5.2rem; }
+  button { cursor: pointer; }
+  button.go { background: #238636; border-color: #2ea043; font-weight: 600; }
+  button.warn { color: #f85149; }
+  #preview { width: 100%; image-rendering: pixelated; background: #000;
+             border-radius: 6px; min-height: 6rem; }
+  #previewcap { color: #8b949e; font-size: .85rem; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: .3rem .4rem; border-top: 1px solid #21262d; }
+  td.name { font-family: ui-monospace, monospace; word-break: break-all; }
+  #drop { border: 1px dashed #30363d; border-radius: 6px; padding: .8rem;
+          text-align: center; color: #8b949e; margin-top: .6rem; }
+  #drop.hot { border-color: #3fb950; color: #3fb950; }
+  footer { color: #57606a; font-size: .8rem; margin-top: 1rem; }
+</style>
+
+<header>
+  <span id="led"></span>
+  <h1>picam2hdmi</h1>
+  <span id="facts">connecting…</span>
+</header>
+<div id="err"></div>
+
+<main>
+  <section id="card-pattern">
+    <h2>Pattern source</h2>
+    <label>pattern <select id="pat">
+      <option>counting</option><option>checker</option>
+      <option>corners</option><option>gradient</option></select></label>
+    <label>bayer <select id="bayer">
+      <option>RGGB</option><option>GRBG</option>
+      <option>GBRG</option><option>BGGR</option></select></label>
+    <br>
+    <label>width <input id="w" type="number" value="512" step="2"></label>
+    <label>height <input id="h" type="number" value="240" step="2"></label>
+    <label><input id="tun" type="checkbox"> luma tunnel</label>
+    <br>
+    <button class="go" onclick="applyPattern()">Stream pattern</button>
+    <button onclick="setSource({source:'off'})">Off</button>
+  </section>
+
+  <section id="card-preview">
+    <h2>Emitting now</h2>
+    <img id="preview" alt="nothing streaming">
+    <div id="previewcap"></div>
+  </section>
+
+  <section id="card-spool" style="grid-column: 1 / -1">
+    <h2>Spool — recordings</h2>
+    <table id="spool"></table>
+    <div id="drop">drop a .npy recording here, or
+      <input type="file" id="file" accept=".npy"></div>
+  </section>
+</main>
+
+<footer>LAN bench instrument — no login, by design. Wire format:
+<a href="https://github.com/bayerlink/bayerlink" style="color:#58a6ff">bayerlink</a>.
+</footer>
+
+<script>
+const err = m => document.getElementById('err').textContent = m || '';
+
+async function api(method, path, body) {
+  const r = await fetch(path, {method,
+    body: body === undefined ? undefined :
+      (body instanceof Blob ? body : JSON.stringify(body))});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.status);
+  return data;
+}
+
+function setSource(spec) {
+  err('');
+  api('PUT', '/source', spec).then(refresh).catch(e => err(e.message));
+}
+
+function applyPattern() {
+  setSource({source: 'pattern',
+    pattern: document.getElementById('pat').value,
+    bayer: document.getElementById('bayer').value,
+    width: +document.getElementById('w').value,
+    height: +document.getElementById('h').value,
+    luma_tunnel: document.getElementById('tun').checked});
+}
+
+let lastRunning = null, lastSpec = '';
+async function refresh() {
+  let s;
+  try { s = await api('GET', '/status'); }
+  catch (e) { err('instrument unreachable: ' + e.message); return; }
+  const led = document.getElementById('led');
+  led.className = s.last_error ? 'err' : (s.running ? 'on' : '');
+  const src = s.source || {};
+  document.getElementById('facts').textContent =
+    (s.running ? `${src.source}${src.pattern ? ' ' + src.pattern : ''}` +
+      `${src.file ? ' ' + src.file : ''} ${src.width || ''}${src.width ? 'x' + src.height : ''}` +
+      `${src.luma_tunnel ? ' (tunnel)' : ''} @ ${src.mode || ''}` : 'idle') +
+    ` · ${s.frames} frames · ${Math.round(s.uptime_s)}s`;
+  if (s.last_error) err(s.last_error);
+  document.getElementById('card-pattern').classList
+    .toggle('active', s.running && src.source === 'pattern');
+
+  const specNow = JSON.stringify(src) + s.running;
+  if (specNow !== lastSpec) {           // reload preview only on change
+    lastSpec = specNow;
+    const img = document.getElementById('preview');
+    img.src = s.running ? '/preview.png?' + Date.now() : '';
+    document.getElementById('previewcap').textContent = s.running ?
+      'decoded raw samples of the emitted container' : 'nothing streaming';
+  }
+  renderSpool(s.spool, src.file);
+}
+
+function renderSpool(names, active) {
+  const rows = names.map(n => `<tr>
+    <td class="name">${n}${n === active ? ' ▶' : ''}</td>
+    <td><button class="go" onclick='setSource({source:"file",file:"${n}",
+      luma_tunnel:document.getElementById("tun").checked})'>Replay</button></td>
+    <td><a href="/recordings/${n}" download><button>Download</button></a></td>
+    <td><button onclick="previewOf('${n}')">Preview</button></td>
+    <td><button class="warn" onclick="del('${n}')">Delete</button></td>
+  </tr>`);
+  document.getElementById('spool').innerHTML =
+    rows.join('') || '<tr><td class="name">spool is empty</td></tr>';
+}
+
+function previewOf(name) {
+  document.getElementById('preview').src =
+    '/preview.png?recording=' + encodeURIComponent(name) + '&' + Date.now();
+  document.getElementById('previewcap').textContent =
+    'first frame of ' + name + ' (not what is streaming)';
+  lastSpec = '';                          // next refresh restores the live view
+}
+
+function del(name) {
+  err('');
+  api('DELETE', '/recordings/' + name).then(refresh).catch(e => err(e.message));
+}
+
+async function upload(file) {
+  err('');
+  if (!file.name.endsWith('.npy')) { err('recordings are .npy files'); return; }
+  try {
+    await api('PUT', '/recordings/' + encodeURIComponent(file.name), file);
+    refresh();
+  } catch (e) { err(e.message); }
+}
+
+const drop = document.getElementById('drop');
+drop.addEventListener('dragover', e => { e.preventDefault();
+                                         drop.classList.add('hot'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('hot'));
+drop.addEventListener('drop', e => { e.preventDefault();
+  drop.classList.remove('hot');
+  for (const f of e.dataTransfer.files) upload(f); });
+document.getElementById('file').addEventListener('change',
+  e => { for (const f of e.target.files) upload(f); });
+
+refresh();
+setInterval(refresh, 1500);
+</script>

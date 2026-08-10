@@ -47,3 +47,6 @@ include = ["picam2hdmi*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+picam2hdmi = ["ui.html"]
