@@ -52,7 +52,7 @@ def main(argv=None) -> int:
     stream.add_argument("--luma-tunnel", action="store_true",
                         help="wrap the container in bayerlink's luma tunnel, "
                              "for Y-only capture paths (cheap YUY2 dongles); "
-                             "pick a small --width/--height, capacity is 1/6")
+                             "pick a small --width/--height, capacity is 1/18")
 
     args = parser.parse_args(argv)
 
