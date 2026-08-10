@@ -214,10 +214,13 @@ function fullFrame() { crop = {x: 0, y: 0, w: sensor.w, h: sensor.h};
 function isFull() { return crop.x === 0 && crop.y === 0 &&
                     crop.w === sensor.w && crop.h === sensor.h; }
 
+let view = null;   // the live sensor image, when the camera is streaming
+
 function drawCrop() {
   const area = $('croparea');
   const width = area.clientWidth || area.offsetWidth;
-  area.style.height = Math.round(width * sensor.h / sensor.w) + 'px';
+  const height = Math.round(width * sensor.h / sensor.w);
+  area.style.height = height + 'px';
   const scale = width / sensor.w;
   const box = $('cropbox');
   box.style.left = crop.x * scale + 'px';
@@ -225,6 +228,19 @@ function drawCrop() {
   box.style.width = crop.w * scale + 'px';
   box.style.height = crop.h * scale + 'px';
   box.classList.toggle('full', isFull());
+  if (view) {
+    // The box IS the picture being emitted: the live view at full
+    // brightness inside, dimmed outside for aiming. Same image both
+    // places; the box's copy is offset so the window aligns exactly.
+    area.style.background = 'linear-gradient(rgba(13,17,23,.75),' +
+      `rgba(13,17,23,.75)), url(${view}) 0 0 / 100% 100%`;
+    box.style.background =
+      `url(${view}) ${-crop.x * scale}px ${-crop.y * scale}px / ` +
+      `${width}px ${height}px border-box`;
+  } else {
+    area.style.background = '';
+    box.style.background = '';
+  }
   $('cropinfo').innerHTML =
     `crop <b>${crop.w}×${crop.h}</b> at <b>+${crop.x}+${crop.y}</b>` +
     (isFull() ? ' (full frame)' : '') +
@@ -360,22 +376,18 @@ async function refresh() {
   const specNow = JSON.stringify(src) + s.running;
   const live = s.running && src.source === 'camera';
 
-  // The crop is aimed WITHIN the live sensor view: paint the camera's
-  // full frame behind the crop box whenever the streaming mode matches
-  // the editor's. Preloaded, so the poll never paints a half-loaded image.
+  // The crop is aimed WITHIN the live sensor view: fetch the camera's
+  // full frame whenever the streaming mode matches the editor's.
+  // Preloaded, so the poll never paints a half-loaded image.
   const modeMatches = (src.cam_mode || [sensor.w, sensor.h])
                         .join('x') === $('cmode').value;
   if (live && modeMatches) {
     const img = new Image();
-    img.onload = () => {
-      const area = $('croparea');
-      area.style.backgroundImage = `url(${img.src})`;
-      area.style.backgroundSize = '100% 100%';
-    };
+    img.onload = () => { view = img.src; drawCrop(); };
     img.src = '/preview.png?sensor=1&' + Date.now();
-  } else if (!live) {
-    $('croparea').style.backgroundImage = '';
-    $('croparea').style.backgroundSize = '';
+  } else if (!live && view) {
+    view = null;
+    drawCrop();
   }
   if (specNow !== lastSpec || live) {   // cameras move; patterns do not
     lastSpec = specNow;
