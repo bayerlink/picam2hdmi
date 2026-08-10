@@ -46,6 +46,7 @@
                 linear-gradient(#161b22 1px, transparent 1px),
                 linear-gradient(90deg, #161b22 1px, transparent 1px);
               background-size: 10% 10%; }
+  #wirewin { position: absolute; pointer-events: none; display: none; }
   #cropbox { position: absolute; border: 2px solid #3fb950;
              background: rgba(63, 185, 80, .12); cursor: grab;
              box-sizing: border-box; }
@@ -123,6 +124,7 @@
     <label><input id="ctun" type="checkbox" onchange="drawCrop()"> luma tunnel</label>
 
     <div id="croparea">
+      <div id="wirewin"></div>
       <div id="cropbox">
         <div class="handle h-n"  data-h="n"></div>
         <div class="handle h-s"  data-h="s"></div>
@@ -206,6 +208,8 @@ function modeChanged() {
   const [w, h] = $('cmode').value.split('x').map(Number);
   sensor = {w, h};
   crop = {x: 0, y: 0, w, h};
+  view = null;          // another mode's image would sit at wrong scale
+  wire = null;
   drawCrop();
 }
 
@@ -215,7 +219,8 @@ function fullFrame() { crop = {x: 0, y: 0, w: sensor.w, h: sensor.h};
 function isFull() { return crop.x === 0 && crop.y === 0 &&
                     crop.w === sensor.w && crop.h === sensor.h; }
 
-let view = null;   // the live sensor image, when the camera is streaming
+let view = null;   // the emitted window's image, when the camera streams
+let wire = null;   // WHERE that window sits, in sensor coordinates
 
 function drawCrop() {
   const area = $('croparea');
@@ -229,14 +234,28 @@ function drawCrop() {
   box.style.width = crop.w * scale + 'px';
   box.style.height = crop.h * scale + 'px';
   box.classList.toggle('full', isFull());
-  // The box IS the picture being emitted -- the camera's live window
-  // fills it; outside stays the plain sensor grid. Nothing that is not
-  // on the wire is fetched or shown.
-  box.style.background = view ? `url(${view}) 0 0 / 100% 100%` : '';
+  // The live image is pinned to the window ON THE WIRE; the green box
+  // is the pending selection. They coincide exactly when what you drew
+  // is what is streaming -- resizing the box never scales the picture.
+  const wirewin = $('wirewin');
+  if (view && wire) {
+    wirewin.style.display = 'block';
+    wirewin.style.left = wire.x * scale + 'px';
+    wirewin.style.top = wire.y * scale + 'px';
+    wirewin.style.width = wire.w * scale + 'px';
+    wirewin.style.height = wire.h * scale + 'px';
+    wirewin.style.background = `url(${view}) 0 0 / 100% 100%`;
+  } else {
+    wirewin.style.display = 'none';
+  }
+  const applied = wire && crop.x === wire.x && crop.y === wire.y &&
+                  crop.w === wire.w && crop.h === wire.h;
+  box.style.background = applied ? 'transparent' : '';
   $('cropinfo').innerHTML =
     `crop <b>${crop.w}×${crop.h}</b> at <b>+${crop.x}+${crop.y}</b>` +
     (isFull() ? ' (full frame)' : '') +
-    ` — sensor ${sensor.w}×${sensor.h}`;
+    ` — sensor ${sensor.w}×${sensor.h}` +
+    (wire && !applied ? ' — <b>pending</b>: press Stream camera' : '');
   const tunnel = $('ctun').checked;
   const lineBytes = Math.ceil(crop.w * 5 / 4);
   let msg, ok;
@@ -369,17 +388,23 @@ async function refresh() {
   const specNow = JSON.stringify(src) + s.running;
   const live = s.running && src.source === 'camera';
 
-  // A running camera streams INTO the crop box: fetch the emitted
-  // window and paint it there. Preloaded, so the poll never paints a
-  // half-loaded image. The separate emitting-now view would duplicate
-  // the box, so it steps aside while the camera runs.
+  // A running camera streams INTO the editor: the emitted window's
+  // image, painted at the emitted window's place. Preloaded, so the
+  // poll never paints a half-loaded image. The separate emitting-now
+  // view would duplicate it, so it steps aside while the camera runs.
   $('emitwrap').style.display = (live && !pinned) ? 'none' : '';
-  if (live) {
+  const modeMatches = live && (src.cam_mode || [sensor.w, sensor.h])
+                        .join('x') === $('cmode').value;
+  if (modeMatches) {
+    wire = src.crop ? {x: src.crop[0], y: src.crop[1],
+                       w: src.crop[2], h: src.crop[3]}
+                    : {x: 0, y: 0, w: sensor.w, h: sensor.h};
     const img = new Image();
     img.onload = () => { view = img.src; drawCrop(); };
     img.src = '/preview.png?' + Date.now();
-  } else if (view) {
+  } else if (view || wire) {
     view = null;
+    wire = null;
     drawCrop();
   }
   if (!live && specNow !== lastSpec) {
