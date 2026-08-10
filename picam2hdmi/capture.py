@@ -115,7 +115,7 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     OV5647's 2x2-binned mode and the largest of its modes that meets
     1080p's rate rule); ``crop`` selects a window of it.
 
-    ``peek``, if given, receives every 15th emitted container BEFORE
+    ``peek``, if given, receives every 5th emitted container BEFORE
     any tunnel wrap -- the content, so a control surface can show what
     the crop is selecting even when the wire carries the tunnel's grey.
     It never touches the wire path.
@@ -197,7 +197,7 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
             # Peek on the cadence, and IMMEDIATELY when the window moves:
             # a retargeted crop must not leave the old window's image as
             # the current answer for even half a second.
-            if peek is not None and (sequence % 15 == 0
+            if peek is not None and (sequence % 5 == 0
                                      or (x, y, w, h) != shown):
                 peek(container)
                 shown = (x, y, w, h)

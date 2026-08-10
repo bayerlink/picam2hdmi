@@ -486,4 +486,7 @@ $('file').addEventListener('change',
 drawCrop();
 refresh();
 setInterval(refresh, 1500);
+// The live window refreshes faster than the status: the image is tiny
+// (just the crop), so a quick poll is cheap -- ~2-3 fps in the box.
+setInterval(() => { if (wire && !drag) fetchView(0); }, 400);
 </script>

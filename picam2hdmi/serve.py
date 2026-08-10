@@ -183,7 +183,7 @@ class Supervisor:
             supervisor = self
 
             # A camera moves; its preview should too. The capture path
-            # peeks every 15th container BEFORE the tunnel wrap, so the
+            # peeks every 5th container BEFORE the tunnel wrap, so the
             # panel's poll shows the moving window even when the wire
             # carries the tunnel's grey.
             def _stash(container):
