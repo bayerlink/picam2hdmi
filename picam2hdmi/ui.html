@@ -312,12 +312,37 @@ function applyCamera() {
 /* ---------------- status / preview / spool ------------------------------- */
 
 let lastSpec = '';
+let seeded = false;
+
+function seedFrom(src) {   // open showing what is on the wire, once
+  seeded = true;
+  if (src.source === 'camera') {
+    if (src.cam_mode) $('cmode').value = src.cam_mode.join('x');
+    modeChanged();
+    if (src.crop) crop = {x: src.crop[0], y: src.crop[1],
+                          w: src.crop[2], h: src.crop[3]};
+    if (src.exposure_us != null) $('cexp').value = src.exposure_us;
+    if (src.gain != null) $('cgain').value = src.gain;
+    $('ctun').checked = !!src.luma_tunnel;
+    showTab('camera');
+  } else if (src.source === 'pattern') {
+    if (src.pattern) $('pat').value = src.pattern;
+    if (src.bayer) $('bayer').value = src.bayer;
+    if (src.width) $('w').value = src.width;
+    if (src.height) $('h').value = src.height;
+    $('tun').checked = !!src.luma_tunnel;
+  } else if (src.source === 'file') {
+    showTab('replay');
+  }
+}
+
 async function refresh() {
   let s;
   try { s = await api('GET', '/status'); }
   catch (e) { err('instrument unreachable: ' + e.message); return; }
   $('led').className = s.last_error ? 'err' : (s.running ? 'on' : '');
   const src = s.source || {};
+  if (!seeded) seedFrom(src);
   $('facts').textContent =
     (s.running ? `${src.source}${src.pattern ? ' ' + src.pattern : ''}` +
       `${src.file ? ' ' + src.file : ''}` +
