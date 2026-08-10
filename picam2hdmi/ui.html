@@ -347,6 +347,25 @@ let lastSpec = '';
 let seeded = false;
 let pinned = false;   // a spool preview holds the section open
 
+function fetchView(retries) {
+  const img = new Image();
+  img.onload = () => {
+    // An image is only the wire's picture if its pixels say so: a
+    // stale stash from before a crop change has the OLD dimensions,
+    // and painting it would stretch the old window into the new box.
+    if (wire && img.naturalWidth === wire.w
+             && img.naturalHeight === wire.h) {
+      view = img.src;
+      drawCrop();
+    } else {
+      if (view) { view = null; drawCrop(); }   // bare box beats a lie
+      if (wire && retries > 0)
+        setTimeout(() => fetchView(retries - 1), 300);
+    }
+  };
+  img.src = '/preview.png?' + Date.now();
+}
+
 function seedFrom(src) {   // open showing what is on the wire, once
   seeded = true;
   if (src.source === 'camera') {
@@ -403,9 +422,7 @@ async function refresh() {
     wire = src.crop ? {x: src.crop[0], y: src.crop[1],
                        w: src.crop[2], h: src.crop[3]}
                     : {x: 0, y: 0, w: sensor.w, h: sensor.h};
-    const img = new Image();
-    img.onload = () => { view = img.src; drawCrop(); };
-    img.src = '/preview.png?' + Date.now();
+    fetchView(1);
   } else if (view || wire) {
     view = null;
     wire = null;

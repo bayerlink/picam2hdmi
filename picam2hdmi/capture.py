@@ -180,6 +180,7 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     line_bytes = sensor_w // group_samples * group_bytes
 
     sequence = 0
+    shown = (x, y, w, h)
     try:
         while True:
             if crop_ref is not None:
@@ -193,8 +194,13 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
             container = encode_packed(np.ascontiguousarray(window), order,
                                       frame_seq=sequence, bits=bits,
                                       display=target, flags=flags)
-            if peek is not None and sequence % 15 == 0:
+            # Peek on the cadence, and IMMEDIATELY when the window moves:
+            # a retargeted crop must not leave the old window's image as
+            # the current answer for even half a second.
+            if peek is not None and (sequence % 15 == 0
+                                     or (x, y, w, h) != shown):
                 peek(container)
+                shown = (x, y, w, h)
             yield _tunnel.encode(container, display) if luma_tunnel \
                 else container
             sequence += 1
