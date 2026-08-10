@@ -1,0 +1,28 @@
+# picam2hdmi as a bench instrument: power on, it streams the default
+# pattern AND listens for control. Install:
+#   sudo cp picam2hdmi.service /etc/systemd/system/
+#   sudo systemctl enable --now picam2hdmi
+#
+# Then, from anywhere on the bench LAN:
+#   curl http://<pi>:8080/status
+#   curl -X PUT http://<pi>:8080/source -d '{"source":"pattern","pattern":"checker","width":512,"height":240,"bayer":"RGGB"}'
+#   curl -T session.npy http://<pi>:8080/recordings/session.npy
+#   curl -X PUT http://<pi>:8080/source -d '{"source":"file","file":"session.npy"}'
+#
+# A LAN instrument, not an internet service: it binds 0.0.0.0 so the
+# bench can reach it -- firewall the port if the LAN is not yours.
+# Needs a KMS-capable stack (Pi OS Lite, vc4-kms-v3d) and NO desktop
+# session owning the display.
+[Unit]
+Description=bayerlink source instrument (HTTP-controlled scanout)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/picam2hdmi serve --bind 0.0.0.0 --port 8080
+Restart=always
+RestartSec=2
+# DRM master needs either root or the 'video' group.
+User=root
+
+[Install]
+WantedBy=multi-user.target

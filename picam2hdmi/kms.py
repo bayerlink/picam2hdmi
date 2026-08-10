@@ -214,6 +214,16 @@ class Card:
     def _ioctl(self, request: int, arg) -> None:
         fcntl.ioctl(self.fd, request, arg)
 
+    def close(self) -> None:
+        """Release the device -- and with it, DRM master.
+
+        A daemon that restarts its stream must close the old card before
+        opening the next one, or the second modeset loses the master fight
+        against its own predecessor."""
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
     # -- discovery ------------------------------------------------------------ #
 
     def connector(self, connector_id: int | None = None):

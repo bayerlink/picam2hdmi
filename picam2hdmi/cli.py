@@ -1,4 +1,4 @@
-"""Command line: `picam2hdmi pattern` works anywhere; `stream` needs a Pi."""
+"""Command line: `pattern` works anywhere; `stream` and `serve` need a Pi."""
 from __future__ import annotations
 
 import argparse
@@ -61,6 +61,24 @@ def main(argv=None) -> int:
                              "for Y-only capture paths (cheap YUY2 dongles); "
                              "pick a small --width/--height, capacity is 1/18")
 
+    daemon = sub.add_parser(
+        "serve", help="run as a bench instrument: HTTP control of the "
+                      "stream, uploadable recordings (see picam2hdmi/serve.py)")
+    daemon.add_argument("--bind", default="0.0.0.0",
+                        help="a LAN bench instrument, not an internet "
+                             "service -- bind accordingly")
+    daemon.add_argument("--port", type=int, default=8080)
+    daemon.add_argument("--spool", default="/var/lib/picam2hdmi",
+                        help="where uploaded recordings live")
+    daemon.add_argument("--mode", default="1920x1080@30",
+                        help="default display mode; a /source request may "
+                             "override per stream")
+    daemon.add_argument("--connector", type=int, default=None)
+    daemon.add_argument("--card", default=None)
+    daemon.add_argument("--no-autostart", action="store_true",
+                        help="start idle instead of streaming the default "
+                             "pattern at boot")
+
     args = parser.parse_args(argv)
 
     if args.command == "pattern":
@@ -80,6 +98,18 @@ def main(argv=None) -> int:
         print(f"wrote {args.out}: {args.mode} {args.width}x{args.height} "
               f"({header.fourcc}, seq {header.frame_seq}) in "
               f"{display[0]}x{display[1]}, round-trip verified")
+        return 0
+
+    if args.command == "serve":
+        from .serve import Supervisor, serve
+
+        supervisor = Supervisor(args.spool, args.mode,
+                                connector=args.connector,
+                                card_path=args.card)
+        autostart = None if args.no_autostart else {
+            "source": "pattern", "pattern": "counting",
+            "width": 512, "height": 240, "bayer": "RGGB"}
+        serve(args.bind, args.port, supervisor, autostart=autostart)
         return 0
 
     if args.command == "stream":

@@ -75,6 +75,13 @@ def stream(frames, mode: tuple[int, int, int] | None = None,
             the daemon uses it for liveness logging.
     """
     card = kms.Card.open(card_path)
+    try:
+        return _stream(card, frames, mode, connector, on_frame)
+    finally:
+        card.close()
+
+
+def _stream(card, frames, mode, connector, on_frame) -> None:
     connector_id, crtc_id, modes = card.connector(connector)
     chosen = kms.pick_mode(modes, mode)
     forced = card.force_full_range(connector_id)

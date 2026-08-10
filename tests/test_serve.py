@@ -1,0 +1,99 @@
+"""The instrument's contract, off-target: a fake runner, a real server."""
+from __future__ import annotations
+
+import http.client
+import json
+import threading
+
+import numpy as np
+import pytest
+
+from bayerlink import encode_frame, pattern
+from picam2hdmi.serve import Supervisor, _handler
+from http.server import ThreadingHTTPServer
+
+
+def _fake_runner(frames, mode=None, connector=None, card_path=None,
+                 on_frame=None):
+    """Consume frames like the real scanout, minus the silicon."""
+    for index, _ in enumerate(frames):
+        if on_frame is not None:
+            on_frame(index)                    # raises _Stop on shutdown
+
+
+@pytest.fixture()
+def instrument(tmp_path):
+    supervisor = Supervisor(tmp_path / "spool", "64x16@30",
+                            runner=_fake_runner)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(supervisor))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield supervisor, server.server_address[1]
+    server.shutdown()
+    supervisor.stop()
+
+
+def _request(port, method, path, body=None):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request(method, path,
+                 body=json.dumps(body).encode() if isinstance(body, dict)
+                 else body)
+    response = conn.getresponse()
+    return response.status, json.loads(response.read())
+
+
+def test_status_starts_idle(instrument):
+    _, port = instrument
+    code, status = _request(port, "GET", "/status")
+    assert code == 200
+    assert status["running"] is False and status["spool"] == []
+
+
+def test_source_switches_and_counts_frames(instrument):
+    supervisor, port = instrument
+    code, status = _request(port, "PUT", "/source", {
+        "source": "pattern", "pattern": "counting",
+        "width": 16, "height": 4, "bayer": "RGGB"})
+    assert code == 200 and status["running"] is True
+    for _ in range(200):
+        if supervisor.status()["frames"] > 10:
+            break
+    code, status = _request(port, "PUT", "/source", {"source": "off"})
+    assert code == 200 and status["running"] is False
+
+
+def test_a_bad_spec_is_a_400_with_the_reason(instrument):
+    _, port = instrument
+    code, body = _request(port, "PUT", "/source", {
+        "source": "pattern", "width": 4096, "height": 4})
+    assert code == 400
+    assert "display line carries" in body["error"]
+    code, body = _request(port, "PUT", "/source", {"source": "camera"})
+    assert code == 400 and "not one of" in body["error"]
+
+
+def test_recordings_upload_list_and_replay(instrument, tmp_path):
+    supervisor, port = instrument
+    frame = encode_frame(pattern.generate("counting", 16, 4), "RGGB",
+                         frame_seq=0, display=(64, 16))
+    payload = tmp_path / "up.npy"
+    np.save(payload, np.stack([frame, frame]))
+
+    code, body = _request(port, "PUT", "/recordings/session.npy",
+                          payload.read_bytes())
+    assert code == 200 and body["saved"] == "session.npy"
+    code, body = _request(port, "GET", "/recordings")
+    assert body["recordings"] == ["session.npy"]
+
+    code, status = _request(port, "PUT", "/source",
+                            {"source": "file", "file": "session.npy"})
+    assert code == 200 and status["running"] is True
+
+
+def test_traversal_names_are_refused(instrument):
+    _, port = instrument
+    code, body = _request(port, "PUT", "/recordings/..%2fetc.npy", b"x")
+    assert code == 400
+    code, body = _request(port, "PUT", "/source",
+                          {"source": "file", "file": "../../etc/passwd"})
+    assert code == 400
