@@ -72,6 +72,18 @@ input to hardware generated with [np2hw](https://github.com/lanserge/np2hw)
 — but useful to anyone who wants real sensor data into a board without
 MIPI hardware, deserialisers, or per-sensor bring-up.
 
+## Funding
+
+Developed independently; recurring support via
+[github.com/sponsors/lanserge](https://github.com/sponsors/lanserge), or write
+first: **s.rabykin@gmail.com**. Sponsorable capability targets carry the
+`sponsorable` label on the issue tracker — currently
+[Pi 5 camera support](https://github.com/bayerlink/picam2hdmi/issues/1)
+(the RP1's 16-bit raw, carried verbatim). Scope is agreed in writing before
+work starts; sponsored work lands in the open tree immediately, MIT like
+everything else — sponsorship buys ordering and named credit, not
+exclusivity.
+
 ## Licence
 
 MIT.
