@@ -308,10 +308,16 @@ $('croparea').addEventListener('pointermove', e => {
     x = snapX(clamp(s.x + dx, 0, sensor.w - s.w));
     y = snapY(clamp(s.y + dy, 0, sensor.h - s.h));
   } else {
-    if (m.includes('e')) w = snapX(clamp(s.w + dx, MINW, sensor.w - s.x));
+    // The width budget constrains the DRAG, not just the request: a box
+    // wider than the link carries would make every release a refusal.
+    const maxW = Math.floor(($('ctun').checked
+      ? TUNNEL_LINE_BYTES * 4 / 5 : SLOTS) / GX) * GX;
+    if (m.includes('e')) w = snapX(clamp(s.w + dx, MINW,
+                                         Math.min(maxW, sensor.w - s.x)));
     if (m.includes('s')) h = snapY(clamp(s.h + dy, MINH, sensor.h - s.y));
     if (m.includes('w')) {
-      x = snapX(clamp(s.x + dx, 0, s.x + s.w - MINW));
+      x = snapX(clamp(s.x + dx, Math.max(0, s.x + s.w - maxW),
+                      s.x + s.w - MINW));
       w = s.w + (s.x - x);
     }
     if (m.includes('n')) {
@@ -338,7 +344,14 @@ function applyCamera() {
   if (!isFull()) spec.crop = [crop.x, crop.y, crop.w, crop.h];
   if ($('cexp').value !== '') spec.exposure_us = +$('cexp').value;
   if ($('cgain').value !== '') spec.gain = +$('cgain').value;
-  setSource(spec);
+  err('');
+  pinned = false;
+  api('PUT', '/source', spec).then(refresh).catch(e => {
+    err(e.message);
+    // A refused window must not linger as the box: snap back to the
+    // wire's reality, or every later gesture re-fails the same way.
+    if (wire) { crop = {...wire}; drawCrop(); }
+  });
 }
 
 /* ---------------- status / preview / spool ------------------------------- */
