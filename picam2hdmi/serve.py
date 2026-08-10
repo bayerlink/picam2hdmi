@@ -164,6 +164,11 @@ class Supervisor:
         elif source == "camera":
             from . import capture
 
+            # The camera is exclusive: a second open while the old stream
+            # holds it cannot even initialise, so this one source stops
+            # the world FIRST and validates after -- a bad camera spec
+            # costs the running stream, and the 400 still names why.
+            self.stop()
             cam_mode = spec.get("cam_mode")
             crop = spec.get("crop")
             frames = capture.frames(
@@ -208,6 +213,7 @@ class Supervisor:
         self._stop.clear()
         self._frames = 0
         self._started = time.monotonic()
+        self._frames_gen = frames
         self._thread = threading.Thread(
             target=self._run, args=(frames, mode), daemon=True)
         self._thread.start()
@@ -215,9 +221,15 @@ class Supervisor:
     def stop(self) -> None:
         with self._lock:
             thread, self._thread = self._thread, None
+            generator, self._frames_gen = getattr(self, "_frames_gen",
+                                                  None), None
         if thread is not None and thread.is_alive():
             self._stop.set()
             thread.join(timeout=5)
+        if generator is not None:
+            # Runs the generator's finally NOW -- an exclusive device
+            # (the camera) must be free before the next source opens it.
+            generator.close()
 
     def _run(self, frames, mode) -> None:
         def on_frame(index):

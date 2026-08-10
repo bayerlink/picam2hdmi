@@ -159,16 +159,22 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     line_bytes = sensor_w // group_samples * group_bytes
 
     sequence = 0
-    while True:
-        buffer = picam2.capture_array("raw")
-        # The buffer is (rows, stride) uint8; the stride carries padding
-        # beyond the packed line, and vertical crop is row slicing.
-        rows = buffer[y:y + h, :line_bytes]
-        window = crop_packed(rows, x, w, bits) if (x or w != sensor_w) \
-            else rows
-        container = encode_packed(np.ascontiguousarray(window), order,
-                                  frame_seq=sequence, bits=bits,
-                                  display=target, flags=flags)
-        yield _tunnel.encode(container, display) if luma_tunnel \
-            else container
-        sequence += 1
+    try:
+        while True:
+            buffer = picam2.capture_array("raw")
+            # The buffer is (rows, stride) uint8; the stride carries
+            # padding beyond the packed line; vertical crop is row slicing.
+            rows = buffer[y:y + h, :line_bytes]
+            window = crop_packed(rows, x, w, bits) if (x or w != sensor_w) \
+                else rows
+            container = encode_packed(np.ascontiguousarray(window), order,
+                                      frame_seq=sequence, bits=bits,
+                                      display=target, flags=flags)
+            yield _tunnel.encode(container, display) if luma_tunnel \
+                else container
+            sequence += 1
+    finally:
+        # The camera is exclusive hardware; release it the moment this
+        # generator is closed, not whenever a collector gets around to it.
+        picam2.stop()
+        picam2.close()
