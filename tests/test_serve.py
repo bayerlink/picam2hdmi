@@ -147,3 +147,43 @@ def test_panel_preview_download_delete(instrument, tmp_path):
     assert conn.getresponse().status == 200
     assert supervisor.status()["spool"] == []
 
+
+def test_crop_only_change_retargets_the_running_camera(instrument):
+    import time
+
+    supervisor, port = instrument
+    # A fake camera mid-stream: a live thread, plus the facts
+    # capture.frames fills into the crop ref on startup.
+    thread = threading.Thread(target=time.sleep, args=(30,), daemon=True)
+    thread.start()
+    supervisor._thread = thread
+    supervisor._camera_ref = {"sensor": (64, 48), "bits": 10,
+                              "order": "GBRG", "display": (64, 16),
+                              "target": (64, 16), "crop": (0, 0, 64, 12)}
+    spec = {"source": "camera", "cam_mode": [64, 48], "exposure_us": 1000,
+            "gain": 2.0, "luma_tunnel": False, "mode": "64x16@30"}
+    supervisor.spec = dict(spec)
+
+    # Only the window differs: retargeted live, same thread, no restart.
+    code, status = _request(port, "PUT", "/source",
+                            dict(spec, crop=[8, 2, 16, 8]))
+    assert code == 200 and status["running"] is True
+    assert supervisor._camera_ref["crop"] == (8, 2, 16, 8)
+    assert supervisor._thread is thread
+
+    # A refused window is still a named 400, and the stream keeps its
+    # old window -- validation happens before anything is written.
+    code, body = _request(port, "PUT", "/source",
+                          dict(spec, crop=[1, 0, 16, 8]))
+    assert code == 400 and "multiples" in body["error"]
+    assert supervisor._camera_ref["crop"] == (8, 2, 16, 8)
+
+    # Too tall for the display: the library's own refusal comes back.
+    code, body = _request(port, "PUT", "/source",
+                          dict(spec, crop=[0, 0, 16, 48]))
+    assert code == 400 and "display" in body["error"]
+    assert supervisor._camera_ref["crop"] == (8, 2, 16, 8)
+
+    # Anything beyond geometry (gain here) is a real restart path.
+    assert not supervisor._crop_only_change(dict(spec, gain=4.0))
+    supervisor._thread = None             # hand the fake back untouched

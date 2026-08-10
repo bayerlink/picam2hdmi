@@ -98,6 +98,7 @@ class Supervisor:
         self.spec = {"source": "off"}
         self.last_error = None
         self.preview_container = None
+        self._camera_ref = None
 
     # -- facts ---------------------------------------------------------------
 
@@ -133,6 +134,7 @@ class Supervisor:
         mode = _parse_mode(mode_text)
         display = (mode[0], mode[1])
         tunnel = bool(spec.get("luma_tunnel", False))
+        crop_ref = None                   # camera only; filled on startup
         if source == "pattern":
             frames = output.pattern_frames(
                 spec.get("pattern", "counting"),
@@ -165,6 +167,12 @@ class Supervisor:
         elif source == "camera":
             from . import capture
 
+            # A crop is a byte slice, not a camera setting: if the SAME
+            # camera is already streaming and only the window moved,
+            # retarget it live -- no restart, no dropped frames.
+            if self._crop_only_change(spec):
+                return self._live_crop(spec, mode_text)
+
             # The camera is exclusive: a second open while the old stream
             # holds it cannot even initialise, so this one source stops
             # the world FIRST and validates after -- a bad camera spec
@@ -181,13 +189,14 @@ class Supervisor:
             def _stash(container):
                 supervisor.preview_container = container
 
+            crop_ref = {}
             frames = capture.frames(
                 display,
                 mode=tuple(int(v) for v in cam_mode) if cam_mode else None,
                 crop=tuple(int(v) for v in crop) if crop else None,
                 exposure_us=spec.get("exposure_us"),
                 analogue_gain=spec.get("gain"),
-                luma_tunnel=tunnel, peek=_stash)
+                luma_tunnel=tunnel, peek=_stash, crop_ref=crop_ref)
             first = next(frames)          # frame 0 peeked during this pull
             preview = self.preview_container
             frames = _chain(first, frames)
@@ -209,6 +218,7 @@ class Supervisor:
 
         self.stop()
         self.preview_container = preview
+        self._camera_ref = crop_ref
         self.spec = dict(spec, mode=mode_text)
         self.last_error = None
         self._stop.clear()
@@ -219,7 +229,56 @@ class Supervisor:
             target=self._run, args=(frames, mode), daemon=True)
         self._thread.start()
 
+    def _crop_only_change(self, spec: dict) -> bool:
+        """True when a camera is streaming and only the window differs."""
+        alive = self._thread is not None and self._thread.is_alive()
+        if not (alive and self.spec.get("source") == "camera"
+                and getattr(self, "_camera_ref", None)):
+            return False
+        old = self.spec
+
+        def norm(v):
+            return [int(n) for n in v] if v else None
+        return (spec.get("mode", self.default_mode) == old.get("mode")
+                and norm(spec.get("cam_mode")) == norm(old.get("cam_mode"))
+                and spec.get("exposure_us") == old.get("exposure_us")
+                and spec.get("gain") == old.get("gain")
+                and spec.get("flags") == old.get("flags")
+                and bool(spec.get("luma_tunnel"))
+                == bool(old.get("luma_tunnel")))
+
+    def _live_crop(self, spec: dict, mode_text: str) -> None:
+        """Retarget the running camera's window; refusals stay identical.
+
+        Validation is the same code the stream runs: the geometry rules
+        via validate_crop/check_rate, and the display-fit rule by
+        encoding a zero-filled window -- so a window accepted HERE
+        cannot kill the stream THERE, and a refused one carries the
+        library's own message."""
+        import numpy as np
+        from bayerlink import encode_packed
+        from bayerlink.protocol import _GROUP
+
+        from . import capture
+
+        ref = self._camera_ref
+        crop = spec.get("crop")
+        if crop is not None:
+            window = capture.validate_crop(crop, ref["sensor"], ref["bits"])
+        else:
+            window = (0, 0, *ref["sensor"])
+        x, y, w, h = window
+        capture.check_rate(w, ref["display"])
+        group_samples, group_bytes = _GROUP[ref["bits"]]
+        line_bytes = w // group_samples * group_bytes
+        encode_packed(np.zeros((h, line_bytes), np.uint8), ref["order"],
+                      frame_seq=0, bits=ref["bits"], display=ref["target"])
+        ref["crop"] = window
+        self.spec = dict(spec, mode=mode_text)
+        self.last_error = None
+
     def stop(self) -> None:
+        self._camera_ref = None
         with self._lock:
             thread, self._thread = self._thread, None
             generator, self._frames_gen = getattr(self, "_frames_gen",

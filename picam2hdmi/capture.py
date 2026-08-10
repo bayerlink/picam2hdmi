@@ -106,7 +106,8 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
            crop: tuple[int, int, int, int] | None = None,
            exposure_us: int | None = None,
            analogue_gain: float | None = None,
-           luma_tunnel: bool = False, flags: int = 0, peek=None):
+           luma_tunnel: bool = False, flags: int = 0, peek=None,
+           crop_ref=None):
     """An endless container source from the camera. Runs on the Pi.
 
     Yields scanout-shaped frames exactly like the pattern and file
@@ -118,6 +119,15 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     any tunnel wrap -- the content, so a control surface can show what
     the crop is selecting even when the wire carries the tunnel's grey.
     It never touches the wire path.
+
+    ``crop_ref``, if given, is a mutable mapping. On startup this
+    source fills it with the facts a controller needs to validate a
+    window (sensor, bits, order, display, target) plus the active
+    ``crop``; from then on, each frame reads ``crop_ref["crop"]`` and
+    slices accordingly. Cropping is a byte slice, not a camera setting
+    -- so a VALIDATED window written there retargets the next frame
+    with no restart, which is how a panel drags a window across a
+    streaming sensor.
     """
     try:
         from picamera2 import Picamera2
@@ -155,6 +165,10 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
 
     target = _tunnel.inner_display(*display) if luma_tunnel else display
     check_rate(w, display)
+    if crop_ref is not None:
+        crop_ref.update(sensor=(sensor_w, sensor_h), bits=bits, order=order,
+                        display=tuple(display), target=tuple(target),
+                        crop=(x, y, w, h))
 
     picam2.start()
     print(f"camera: {fmt} {sensor_w}x{sensor_h}, window {w}x{h}+{x}+{y}, "
@@ -168,6 +182,8 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     sequence = 0
     try:
         while True:
+            if crop_ref is not None:
+                x, y, w, h = crop_ref["crop"]
             buffer = picam2.capture_array("raw")
             # The buffer is (rows, stride) uint8; the stride carries
             # padding beyond the packed line; vertical crop is row slicing.

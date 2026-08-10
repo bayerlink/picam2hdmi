@@ -255,7 +255,7 @@ function drawCrop() {
     `crop <b>${crop.w}×${crop.h}</b> at <b>+${crop.x}+${crop.y}</b>` +
     (isFull() ? ' (full frame)' : '') +
     ` — sensor ${sensor.w}×${sensor.h}` +
-    (wire && !applied ? ' — <b>pending</b>: press Stream camera' : '');
+    (wire && !applied ? ' — applies on release' : '');
   const tunnel = $('ctun').checked;
   const lineBytes = Math.ceil(crop.w * 5 / 4);
   let msg, ok;
@@ -322,9 +322,13 @@ $('croparea').addEventListener('pointermove', e => {
   crop = {x, y, w, h};
   drawCrop();
 });
-const endDrag = () => drag = null;
-$('croparea').addEventListener('pointerup', endDrag);
-$('croparea').addEventListener('pointercancel', endDrag);
+$('croparea').addEventListener('pointerup', () => {
+  const moved = drag && wire && (crop.x !== wire.x || crop.y !== wire.y ||
+                                 crop.w !== wire.w || crop.h !== wire.h);
+  drag = null;
+  if (moved) applyCamera();   // geometry-only: the daemon retargets live
+});
+$('croparea').addEventListener('pointercancel', () => drag = null);
 window.addEventListener('resize', drawCrop);
 
 function applyCamera() {
