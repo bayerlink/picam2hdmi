@@ -45,7 +45,7 @@ print(header.bayer_order, header.width, header.height, header.frame_seq)
 | CLI: pattern → container file | **done** |
 | KMS scanout (double-buffered, full-range RGB forced) | **implemented** — pure ctypes DRM, off-target tests green; first on-Pi run is the phase-0 session |
 | Appliance mode | `contrib/picam2hdmi-pattern.service`: power on, it streams |
-| Picamera2 raw capture (zero-copy dmabuf path) | next — design in `capture.py` |
+| Picamera2 raw capture | **working** — the sensor's packed bytes ride to the wire verbatim; crop, fixed exposure/gain, every libcamera camera unseen |
 
 ## Usage today
 
