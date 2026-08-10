@@ -12,7 +12,7 @@ from bayerlink import pattern, protocol
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="picam2hdmi",
-        description="Raw Bayer over HDMI, speaking bayerlink v1 "
+        description="Raw Bayer over HDMI, speaking bayerlink v2 "
                     "(github.com/bayerlink/bayerlink).")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -71,7 +71,7 @@ def main(argv=None) -> int:
     stream.add_argument("--luma-tunnel", action="store_true",
                         help="wrap the container in bayerlink's luma tunnel, "
                              "for Y-only capture paths (cheap YUY2 dongles); "
-                             "pick a small --width/--height, capacity is 1/18")
+                             "pick a small --width/--height, capacity is 1/40")
 
     daemon = sub.add_parser(
         "serve", help="run as a bench instrument: HTTP control of the "
