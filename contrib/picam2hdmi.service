@@ -18,7 +18,7 @@ Description=bayerlink source instrument (HTTP-controlled scanout)
 After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/picam2hdmi serve --bind 0.0.0.0 --port 8080
+ExecStart=/usr/local/bin/picam2hdmi serve --bind 0.0.0.0 --port 8080
 Restart=always
 RestartSec=2
 # DRM master needs either root or the 'video' group.

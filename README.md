@@ -43,19 +43,30 @@ print(header.bayer_order, header.width, header.height, header.frame_seq)
 | --- | --- |
 | bayerlink v2 protocol, patterns, vectors | **done** — in [bayerlink](https://github.com/bayerlink/bayerlink) |
 | CLI: pattern → container file | **done** |
-| KMS scanout (double-buffered, full-range RGB forced) | **implemented** — pure ctypes DRM, off-target tests green; first on-Pi run is the phase-0 session |
-| Appliance mode | `contrib/picam2hdmi-pattern.service`: power on, it streams |
+| KMS scanout (double-buffered, full-range RGB forced) | **working** — pure ctypes DRM, proven on the bench |
 | Picamera2 raw capture | **working** — the sensor's packed bytes ride to the wire verbatim; crop, fixed exposure/gain, every libcamera camera unseen |
+| Instrument mode | **working** — `picam2hdmi serve`: HTTP control, recordings spool, a control panel with a live viewfinder crop editor (`contrib/picam2hdmi.service` for power-on) |
 
-## Usage today
+## Usage
+
+Off-target, on any machine (numpy only):
 
 ```bash
-pip install picam2hdmi          # numpy only; add [pi] on the Pi itself
+pip install picam2hdmi
 picam2hdmi pattern --mode counting --width 2028 --height 1078 --out frame.npy
 ```
 
 That file is bit-for-bit what the HDMI link will carry — receivers can be
 built and tested against it before any cable exists.
+
+On a Pi, **[SETUP.md](SETUP.md)** is the step-by-step from blank SD card to
+streaming instrument (or `contrib/install.sh` does the install in one go).
+The short of it:
+
+```bash
+sudo picam2hdmi stream --source camera --exposure-us 30000 --gain 4.0
+sudo picam2hdmi serve                  # instrument: panel + HTTP on :8080
+```
 
 ## The one integration rule
 
