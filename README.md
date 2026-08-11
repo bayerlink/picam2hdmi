@@ -98,7 +98,8 @@ verified data pack in the library, with your name on the release
 [IMX219](https://github.com/bayerlink/picam2hdmi/issues/5)). Scope is agreed in writing before
 work starts; sponsored work lands in the open tree immediately, MIT like
 everything else — sponsorship buys ordering and named credit, not
-exclusivity.
+exclusivity. The person behind it:
+[serge.rabyking.com](https://serge.rabyking.com).
 
 ## Licence
 
