@@ -296,6 +296,27 @@ class Supervisor:
                 self.revive_once()
         threading.Thread(target=beat, daemon=True).start()
 
+    def capture(self) -> str:
+        """Freeze the frame being emitted into a sequential spool file.
+
+        What is captured is the CONTAINER -- header, window, everything
+        the wire carries -- so a capture replays exactly like a
+        recording, because it is one. The stream is not touched: this
+        reads the peek copy the runner already keeps for previews.
+        """
+        import numpy as np
+
+        container = self.preview_container
+        if container is None:
+            raise ValueError("nothing is streaming, so there is no frame "
+                             "to capture")
+        number = 1
+        while (self.spool / f"capture-{number:03d}.npy").exists():
+            number += 1
+        path = self.spool / f"capture-{number:03d}.npy"
+        np.save(path, np.asarray(container))
+        return path.name
+
     def _persist(self) -> None:
         """State retention, best-effort: streaming is the job, not this."""
         self._persist_intent(self.spec)
@@ -484,6 +505,15 @@ def _handler(supervisor: Supervisor):
                 return self._send_bytes(200, path.read_bytes(),
                                         "application/octet-stream")
             return self._send(404, {"error": f"no route {self.path!r}"})
+
+        def do_POST(self):
+            if self.path == "/capture":
+                try:
+                    name = supervisor.capture()
+                except ValueError as error:
+                    return self._send(400, {"error": str(error)})
+                return self._send(200, {"saved": name})
+            self._send(404, {"error": "unknown path"})
 
         def do_DELETE(self):
             if self.path.startswith("/recordings/"):

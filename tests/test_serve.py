@@ -299,3 +299,25 @@ def test_a_choice_made_in_the_dark_is_kept_as_intent(instrument, monkeypatch):
     monkeypatch.setattr(output, "pattern_frames", real)
     assert supervisor.revive_once() is True
     assert supervisor.status()["running"] is True
+
+
+def test_capture_freezes_the_emitted_frame_into_the_spool(instrument):
+    supervisor, port = instrument
+    code, _ = _request(port, "POST", "/capture")
+    assert code == 400                       # nothing streaming yet
+
+    code, _ = _request(port, "PUT", "/source", {
+        "source": "pattern", "pattern": "counting",
+        "width": 16, "height": 4, "bayer": "RGGB"})
+    assert code == 200
+    code, body = _request(port, "POST", "/capture")
+    assert code == 200 and body["saved"] == "capture-001.npy"
+    code, body = _request(port, "POST", "/capture")
+    assert body["saved"] == "capture-002.npy"    # subsequent, not clobbered
+    assert "capture-001.npy" in supervisor.status()["spool"]
+
+    # And a capture IS a recording: it streams like one.
+    code, _ = _request(port, "PUT", "/source",
+                       {"source": "file", "file": "capture-001.npy"})
+    assert code == 200
+    assert supervisor.status()["running"] is True

@@ -144,6 +144,7 @@
       <button id="win-full" onclick="windowMode(false)">Full frame</button>
       <button id="win-sel" onclick="windowMode(true)">Selection</button>
     </span>
+    <button onclick="captureFrame()">Capture</button>
   </div>
 
   <section class="below" id="emitwrap">
@@ -286,6 +287,14 @@ function applyFromFields() {
   // field) -- but only a user's edit lands here: scripted .value writes
   // fire no events, so seeding never re-applies what it just read.
   if (chosen && chosen.kind === 'camera') applyCamera();
+}
+
+function captureFrame() {
+  // Freeze what the wire is emitting -- the current window, container
+  // and all -- into the next capture-NNN.npy. It appears in the source
+  // list at once, because a capture IS a recording.
+  err('');
+  api('POST', '/capture').then(refresh).catch(e => err(e.message));
 }
 
 function windowMode(sel) {
