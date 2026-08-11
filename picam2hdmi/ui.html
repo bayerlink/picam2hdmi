@@ -416,7 +416,9 @@ function seedFrom(src) {   // open showing what is on the wire, once
     if (src.crop) {
       crop = {x: src.crop[0], y: src.crop[1],
               w: src.crop[2], h: src.crop[3]};
-      useSelection = true;
+      // The wire always states its window, full frame included; which
+      // MODE that is follows from whether it covers the sensor.
+      useSelection = !coversSensor(crop);
     }
     if (src.exposure_us != null) $('cexp').value = src.exposure_us;
     if (src.gain != null) $('cgain').value = src.gain;
