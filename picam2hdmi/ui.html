@@ -16,20 +16,32 @@
   #pwr { margin-left: auto; }
   #err { color: #f85149; min-height: 1.3em; margin: .5rem 0;
          white-space: pre-wrap; }
-  main { max-width: 64rem; }
-  nav { display: flex; gap: .4rem; margin: .8rem 0 0; }
-  nav button { background: #161b22; border: 1px solid #30363d;
-               border-bottom: none; border-radius: 8px 8px 0 0;
-               padding: .5rem 1.1rem; color: #8b949e; font: inherit;
-               cursor: pointer; position: relative; }
-  nav button.sel { color: #e6edf3; background: #1c2129; }
-  nav button .dot { display: none; width: .5rem; height: .5rem;
-                    border-radius: 50%; background: #3fb950;
-                    position: absolute; top: .45rem; right: .45rem; }
-  nav button.live .dot { display: inline-block; }
-  .tab { display: none; background: #1c2129; border: 1px solid #30363d;
-         border-radius: 0 8px 8px 8px; padding: 1rem; }
-  .tab.sel { display: block; }
+  main { max-width: 72rem; display: flex; gap: 1rem;
+         align-items: flex-start; margin-top: .8rem; }
+  #left { flex: 1; min-width: 0; }
+  #sources { width: 15rem; flex-shrink: 0; background: #161b22;
+             border: 1px solid #30363d; border-radius: 8px; padding: .7rem; }
+  #sources h2 { margin: 0 0 .5rem; font-size: .8rem; text-transform: uppercase;
+                letter-spacing: .09em; color: #8b949e; }
+  #sources .grp { color: #57606a; font-size: .75rem; text-transform: uppercase;
+                  letter-spacing: .08em; margin: .7rem 0 .2rem; }
+  .src { display: flex; align-items: center; gap: .4rem; padding: .35rem .5rem;
+         border-radius: 6px; cursor: pointer; color: #e6edf3;
+         border: 1px solid transparent; position: relative;
+         font-family: ui-monospace, monospace; font-size: .9rem;
+         word-break: break-all; }
+  .src:hover { background: #1c2129; }
+  .src.sel { border-color: #3fb950; background: rgba(63, 185, 80, .1); }
+  .src .dot { display: none; width: .5rem; height: .5rem; flex-shrink: 0;
+              border-radius: 50%; background: #3fb950; margin-left: auto; }
+  .src.live .dot { display: inline-block; }
+  .src .act { visibility: hidden; background: none; border: none;
+              padding: 0 .15rem; color: #8b949e; flex-shrink: 0; }
+  .src:hover .act { visibility: visible; }
+  .src .act:hover { color: #e6edf3; }
+  .card { display: none; background: #1c2129; border: 1px solid #30363d;
+          border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  .card.sel { display: block; }
   label { display: inline-flex; gap: .35rem; align-items: center;
           margin: .15rem .6rem .15rem 0; color: #8b949e; }
   input, select, button { background: #0d1117; color: #e6edf3;
@@ -79,6 +91,7 @@
   td.name { font-family: ui-monospace, monospace; word-break: break-all; }
   #drop { border: 1px dashed #30363d; border-radius: 6px; padding: .8rem;
           text-align: center; color: #8b949e; margin-top: .6rem; }
+  #drop input { max-width: 100%; }
   #drop.hot { border-color: #3fb950; color: #3fb950; }
   footer { color: #57606a; font-size: .8rem; margin-top: 1rem; }
   section.below { background: #161b22; border: 1px solid #30363d;
@@ -97,20 +110,8 @@
 <div id="err"></div>
 
 <main>
-  <nav>
-    <button id="tab-pattern" class="sel" onclick="showTab('pattern')">
-      Pattern<span class="dot"></span></button>
-    <button id="tab-camera" onclick="showTab('camera')">
-      Camera<span class="dot"></span></button>
-    <button id="tab-replay" onclick="showTab('replay')">
-      Replay<span class="dot"></span></button>
-    <button id="tab-off" onclick="setSource({source:'off'})">Off</button>
-  </nav>
-
-  <div class="tab sel" id="pane-pattern">
-    <label>pattern <select id="pat">
-      <option>counting</option><option>checker</option>
-      <option>corners</option><option>gradient</option></select></label>
+  <div id="left">
+  <div class="card" id="pane-pattern">
     <label>bayer <select id="bayer">
       <option>RGGB</option><option>GRBG</option>
       <option>GBRG</option><option>BGGR</option></select></label>
@@ -118,10 +119,10 @@
     <label>height <input id="h" type="number" value="240" step="2"></label>
     <label><input id="tun" type="checkbox"> luma tunnel</label>
     <br>
-    <button class="go" onclick="applyPattern()">Stream pattern</button>
+    <button class="go" onclick="applyPattern()">Apply</button>
   </div>
 
-  <div class="tab" id="pane-camera">
+  <div class="card" id="pane-camera">
     <label>sensor mode <select id="cmode" onchange="modeChanged()">
       <option value="1296x972">1296x972 (binned)</option>
       <option value="2592x1944">2592x1944 (full, crop to fit)</option>
@@ -146,17 +147,11 @@
     <div id="cropinfo"></div>
     <div id="budget"></div>
     <br>
-    <button class="go" onclick="applyCamera()">Stream camera</button>
+    <button class="go" onclick="applyCamera()">Apply</button>
     <span class="seg">
       <button id="win-full" onclick="windowMode(false)">Full frame</button>
       <button id="win-sel" onclick="windowMode(true)">Selection</button>
     </span>
-  </div>
-
-  <div class="tab" id="pane-replay">
-    <table id="spool"></table>
-    <div id="drop">drop a .npy recording here, or
-      <input type="file" id="file" accept=".npy"></div>
   </div>
 
   <section class="below" id="emitwrap">
@@ -164,6 +159,14 @@
     <img id="preview" alt="nothing streaming">
     <div id="previewcap"></div>
   </section>
+  </div>
+
+  <aside id="sources">
+    <h2>Source</h2>
+    <div id="srclist"></div>
+    <div id="drop">drop a .npy recording here, or
+      <input type="file" id="file" accept=".npy"></div>
+  </aside>
 </main>
 
 <footer>LAN bench instrument — no login, by design. Wire format:
@@ -183,12 +186,65 @@ async function api(method, path, body) {
   return data;
 }
 
-function showTab(name) {
-  for (const t of ['pattern', 'camera', 'replay']) {
-    $('tab-' + t).classList.toggle('sel', t === name);
-    $('pane-' + t).classList.toggle('sel', t === name);
-  }
-  if (name === 'camera') drawCrop();
+/* ---------------- the source list --------------------------------------- */
+/* One list chooses the source: None, each camera, the spool, the link-
+   proving patterns. Choosing IS streaming -- this is an instrument, not a
+   form -- and a source's parameters appear only while it is chosen. */
+
+let chosen = null;                 // {kind: off|camera|file|pattern, id}
+let cameras = [];                  // [{index, model}] from /cameras
+let spool = [];
+let liveKey = 'off';               // what the wire says is streaming
+const PATTERNS = ['counting', 'gradient', 'checker', 'corners'];
+const key = (kind, id) => kind + ':' + id;
+
+function showCards() {
+  const kind = chosen && chosen.kind;
+  $('pane-camera').classList.toggle('sel', kind === 'camera');
+  $('pane-pattern').classList.toggle('sel', kind === 'pattern');
+  if (kind === 'camera') drawCrop();
+}
+
+function chooseSource(kind, id) {
+  chosen = {kind, id};
+  showCards();
+  renderSources();
+  if (kind === 'off') setSource({source: 'off'});
+  else if (kind === 'camera') applyCamera();
+  else if (kind === 'file') setSource({source: 'file', file: id});
+  else applyPattern();
+}
+
+function renderSources() {
+  const row = (kind, id, label, extra = '') => {
+    const k = key(kind, id);
+    const sel = chosen && key(chosen.kind, chosen.id) === k;
+    return `<div class="src${sel ? ' sel' : ''}` +
+      `${liveKey === k ? ' live' : ''}" ` +
+      `onclick="chooseSource('${kind}','${id}')">` +
+      `<span>${label}</span>${extra}<span class="dot"></span></div>`;
+  };
+  const acts = name =>
+    `<a href="/recordings/${name}" download onclick="event.stopPropagation()"` +
+    `><button class="act" title="download">&#8595;</button></a>` +
+    `<button class="act" title="delete" ` +
+    `onclick="event.stopPropagation(); del('${name}')">&#10005;</button>`;
+  let rows = [row('off', '0', 'None')];
+  if (cameras.length)
+    rows.push('<div class="grp">cameras</div>',
+      ...cameras.map(c => row('camera', c.index, c.model)));
+  if (spool.length)
+    rows.push('<div class="grp">recordings</div>',
+      ...spool.map(n => row('file', n, n, acts(n))));
+  rows.push('<div class="grp">test patterns</div>',
+    ...PATTERNS.map(n => row('pattern', n, n)));
+  $('srclist').innerHTML = rows.join('');
+}
+
+function fetchCameras() {
+  api('GET', '/cameras')
+    .then(r => { cameras = r.cameras; renderSources(); })
+    .catch(() => {});
 }
 
 function setSource(spec) {
@@ -198,7 +254,7 @@ function setSource(spec) {
 }
 
 function applyPattern() {
-  setSource({source: 'pattern', pattern: $('pat').value,
+  setSource({source: 'pattern', pattern: chosen.id,
     bayer: $('bayer').value, width: +$('w').value, height: +$('h').value,
     luma_tunnel: $('tun').checked});
 }
@@ -245,6 +301,7 @@ let wire = null;   // WHERE that window sits, in sensor coordinates
 function drawCrop() {
   const area = $('croparea');
   const width = area.clientWidth || area.offsetWidth;
+  if (!width) return;               // camera card hidden: nothing to lay out
   const height = Math.round(width * sensor.h / sensor.w);
   area.style.height = height + 'px';
   const scale = width / sensor.w;
@@ -423,16 +480,19 @@ function seedFrom(src) {   // open showing what is on the wire, once
     if (src.exposure_us != null) $('cexp').value = src.exposure_us;
     if (src.gain != null) $('cgain').value = src.gain;
     $('ctun').checked = !!src.luma_tunnel;
-    showTab('camera');
+    chosen = {kind: 'camera', id: 0};
   } else if (src.source === 'pattern') {
-    if (src.pattern) $('pat').value = src.pattern;
     if (src.bayer) $('bayer').value = src.bayer;
     if (src.width) $('w').value = src.width;
     if (src.height) $('h').value = src.height;
     $('tun').checked = !!src.luma_tunnel;
+    chosen = {kind: 'pattern', id: src.pattern || 'counting'};
   } else if (src.source === 'file') {
-    showTab('replay');
+    chosen = {kind: 'file', id: src.file};
+  } else {
+    chosen = {kind: 'off', id: '0'};
   }
+  showCards();
 }
 
 async function refresh() {
@@ -451,9 +511,11 @@ async function refresh() {
       `${src.mode ? ' @ ' + src.mode : ''}` : 'idle') +
     ` · ${s.frames} frames · ${Math.round(s.uptime_s)}s`;
   if (s.last_error) err(s.last_error);
-  for (const t of ['pattern', 'camera'])
-    $('tab-' + t).classList.toggle('live', s.running && src.source === t);
-  $('tab-replay').classList.toggle('live', s.running && src.source === 'file');
+  liveKey = !s.running ? 'off:0'
+    : src.source === 'camera' ? 'camera:0'
+    : src.source === 'file' ? 'file:' + src.file
+    : src.source === 'pattern' ? 'pattern:' + src.pattern
+    : 'off:0';
 
   const specNow = JSON.stringify(src) + s.running;
   const live = s.running && src.source === 'camera';
@@ -481,29 +543,8 @@ async function refresh() {
     $('previewcap').textContent = s.running ?
       'decoded raw samples of the emitted container' : 'nothing streaming';
   }
-  renderSpool(s.spool, src.file);
-}
-
-function renderSpool(names, active) {
-  const rows = names.map(n => `<tr>
-    <td class="name">${n}${n === active ? ' ▶' : ''}</td>
-    <td><button class="go" onclick='setSource({source:"file",file:"${n}"})'>Replay</button></td>
-    <td><a href="/recordings/${n}" download><button>Download</button></a></td>
-    <td><button onclick="previewOf('${n}')">Preview</button></td>
-    <td><button class="warn" onclick="del('${n}')">Delete</button></td>
-  </tr>`);
-  $('spool').innerHTML =
-    rows.join('') || '<tr><td class="name">spool is empty</td></tr>';
-}
-
-function previewOf(name) {
-  pinned = true;                       // keep the section visible for it
-  $('emitwrap').style.display = '';
-  $('preview').src = '/preview.png?recording=' +
-    encodeURIComponent(name) + '&' + Date.now();
-  $('previewcap').textContent =
-    'first frame of ' + name + ' (not what is streaming)';
-  lastSpec = '';
+  spool = s.spool;
+  renderSources();
 }
 
 function del(name) {
@@ -540,7 +581,9 @@ $('pwr').onclick = () => {
 
 drawCrop();
 refresh();
+fetchCameras();
 setInterval(refresh, 1500);
+setInterval(fetchCameras, 30000);   // a reseated ribbon shows up by itself
 // The live window refreshes faster than the status: the image is tiny
 // (just the crop), so a quick poll is cheap -- ~2-3 fps in the box.
 setInterval(() => { if (wire && !drag) fetchView(0); }, 400);

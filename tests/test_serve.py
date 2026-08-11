@@ -255,3 +255,10 @@ def test_the_keeper_revives_retained_intent(instrument):
     assert code == 200
     assert supervisor.revive_once() is False
     assert supervisor.status()["running"] is False
+
+
+def test_cameras_endpoint_lists_or_is_empty(instrument):
+    _, port = instrument
+    code, body = _request(port, "GET", "/cameras")
+    assert code == 200
+    assert isinstance(body["cameras"], list)   # no camera stack here: []

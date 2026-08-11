@@ -416,6 +416,20 @@ def _handler(supervisor: Supervisor):
                 return self._send_bytes(200, page, "text/html; charset=utf-8")
             if self.path == "/status":
                 return self._send(200, supervisor.status())
+            if self.path == "/cameras":
+                # Enumerated fresh on each ask: cameras appear when a ribbon
+                # is reseated, and a panel poll should see that without a
+                # daemon restart. On a bench with no camera stack this is
+                # simply an empty list, never an error.
+                try:
+                    from picamera2 import Picamera2
+                    cameras = [{"index": i,
+                                "model": info.get("Model", f"camera {i}")}
+                               for i, info in
+                               enumerate(Picamera2.global_camera_info())]
+                except Exception:               # noqa: BLE001 -- no camera stack
+                    cameras = []
+                return self._send(200, {"cameras": cameras})
             if self.path == "/recordings":
                 return self._send(200, {"recordings":
                                         supervisor.status()["spool"]})
