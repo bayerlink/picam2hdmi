@@ -111,6 +111,7 @@ class Supervisor:
         self.last_error = None
         self.preview_container = None
         self._camera_ref = None
+        self._start_lock = threading.Lock()
 
     # -- facts ---------------------------------------------------------------
 
@@ -133,7 +134,12 @@ class Supervisor:
 
         Validation happens HERE, in the caller's thread, so a bad request
         is a 400 with the reason -- never a daemon that died in the dark.
+        Serialised: the keeper thread and HTTP handlers may both call in.
         """
+        with self._start_lock:
+            return self._start(spec)
+
+    def _start(self, spec: dict) -> None:
         from . import output
 
         source = spec.get("source")
@@ -242,6 +248,36 @@ class Supervisor:
             target=self._run, args=(frames, mode), daemon=True)
         self._thread.start()
         self._persist()
+
+    def revive_once(self) -> bool:
+        """One keeper beat: if the instrument is idle but its retained
+        source says it should be streaming, try to make it so.
+
+        Cables come and go on a bench; the INTENT is persisted, so the
+        daemon acts on it whenever reality catches up -- a capture stick
+        plugged in minutes after boot, a display re-attached mid-day, a
+        camera that finished enumerating. An explicit 'off' is intent
+        too, and is left alone.
+        """
+        desired = self.stored_spec()
+        if not desired or desired.get("source", "off") == "off":
+            return False
+        if self._thread is not None and self._thread.is_alive():
+            return False
+        try:
+            self.start(desired)
+            return True
+        except Exception as error:            # noqa: BLE001 -- kept as status
+            self.last_error = f"waiting to start: {error}"
+            return False
+
+    def keep(self, interval: float = 5.0) -> None:
+        """Run revive_once forever, gently, in the background."""
+        def beat():
+            while True:
+                time.sleep(interval)
+                self.revive_once()
+        threading.Thread(target=beat, daemon=True).start()
 
     def _persist(self) -> None:
         """State retention, best-effort: streaming is the job, not this."""
@@ -473,21 +509,19 @@ def _handler(supervisor: Supervisor):
 def serve(bind: str, port: int, supervisor: Supervisor,
           autostart: dict | None = None) -> None:
     if autostart:
-        # An appliance boots into its source, and early boot is exactly
-        # when its neighbours are not ready: the camera stack settling, or
-        # a capture stick that enumerates its HDMI seconds after power.
-        # So the one retry-loop in the codebase lives here, and it is
-        # PATIENT -- a display that wakes up late should cost seconds,
-        # not the boot. It still gives up (into a running, idle,
-        # controllable daemon with the reason in last_error) rather than
-        # crash-looping forever.
-        for attempt in range(60):
-            try:
-                supervisor.start(autostart)
-                break
-            except Exception as error:        # noqa: BLE001
-                supervisor.last_error = f"autostart: {error}"
-                time.sleep(2)
+        # An appliance boots into its source -- and keeps heading there.
+        # Early boot is exactly when the neighbours are not ready (a
+        # camera still enumerating, a capture stick that wakes seconds
+        # after power), and a bench UNPLUGS things: the keeper retries
+        # whenever the instrument is idle but its retained intent says
+        # otherwise, forever, gently. Plug the display back in and the
+        # stream returns by itself; an explicit 'off' is intent too and
+        # is respected.
+        try:
+            supervisor.start(autostart)
+        except Exception as error:            # noqa: BLE001
+            supervisor.last_error = f"waiting to start: {error}"
+    supervisor.keep()
     server = ThreadingHTTPServer((bind, port), _handler(supervisor))
     print(f"picam2hdmi instrument on http://{bind}:{port} "
           f"(spool: {supervisor.spool})")

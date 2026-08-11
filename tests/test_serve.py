@@ -233,3 +233,25 @@ def test_power_button(instrument, tmp_path, monkeypatch):
     while not halted.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     assert halted.exists()
+
+
+def test_the_keeper_revives_retained_intent(instrument):
+    supervisor, port = instrument
+    # Streaming, then the world takes the stream away (thread dies).
+    code, _ = _request(port, "PUT", "/source", {
+        "source": "pattern", "pattern": "counting", "width": 16, "height": 4})
+    assert code == 200
+    supervisor._stop.set()
+    supervisor._thread.join(timeout=5)
+    assert not supervisor._thread.is_alive()
+
+    # One keeper beat brings it back from the persisted intent.
+    supervisor._stop.clear()
+    assert supervisor.revive_once() is True
+    assert supervisor.status()["running"] is True
+
+    # An explicit off is intent too: the keeper leaves it alone.
+    code, _ = _request(port, "PUT", "/source", {"source": "off"})
+    assert code == 200
+    assert supervisor.revive_once() is False
+    assert supervisor.status()["running"] is False
