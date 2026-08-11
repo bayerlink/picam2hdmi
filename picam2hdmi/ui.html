@@ -111,17 +111,6 @@
 
 <main>
   <div id="left">
-  <div class="card" id="pane-pattern">
-    <label>bayer <select id="bayer">
-      <option>RGGB</option><option>GRBG</option>
-      <option>GBRG</option><option>BGGR</option></select></label>
-    <label>width <input id="w" type="number" value="512" step="2"></label>
-    <label>height <input id="h" type="number" value="240" step="2"></label>
-    <label><input id="tun" type="checkbox"> luma tunnel</label>
-    <br>
-    <button class="go" onclick="applyPattern()">Apply</button>
-  </div>
-
   <div class="card" id="pane-camera">
     <label>sensor mode <select id="cmode" onchange="modeChanged()">
       <option value="1296x972">1296x972 (binned)</option>
@@ -187,21 +176,21 @@ async function api(method, path, body) {
 }
 
 /* ---------------- the source list --------------------------------------- */
-/* One list chooses the source: None, each camera, the spool, the link-
-   proving patterns. Choosing IS streaming -- this is an instrument, not a
-   form -- and a source's parameters appear only while it is chosen. */
+/* One list chooses the source: None, each camera, the spool. Choosing IS
+   streaming -- this is an instrument, not a form -- and a source's
+   parameters appear only while it is chosen. Test patterns are simply
+   RECORDINGS now: bayerlink generates them as .npy at any geometry, so
+   the spool is where they live, not a special case beside it. */
 
 let chosen = null;                 // {kind: off|camera|file|pattern, id}
 let cameras = [];                  // [{index, model}] from /cameras
 let spool = [];
 let liveKey = 'off';               // what the wire says is streaming
-const PATTERNS = ['counting', 'gradient', 'checker', 'corners'];
 const key = (kind, id) => kind + ':' + id;
 
 function showCards() {
   const kind = chosen && chosen.kind;
   $('pane-camera').classList.toggle('sel', kind === 'camera');
-  $('pane-pattern').classList.toggle('sel', kind === 'pattern');
   if (kind === 'camera') drawCrop();
 }
 
@@ -211,8 +200,7 @@ function chooseSource(kind, id) {
   renderSources();
   if (kind === 'off') setSource({source: 'off'});
   else if (kind === 'camera') applyCamera();
-  else if (kind === 'file') setSource({source: 'file', file: id});
-  else applyPattern();
+  else setSource({source: 'file', file: id});
 }
 
 function renderSources() {
@@ -236,8 +224,6 @@ function renderSources() {
   if (spool.length)
     rows.push('<div class="grp">recordings</div>',
       ...spool.map(n => row('file', n, n, acts(n))));
-  rows.push('<div class="grp">test patterns</div>',
-    ...PATTERNS.map(n => row('pattern', n, n)));
   $('srclist').innerHTML = rows.join('');
 }
 
@@ -251,12 +237,6 @@ function setSource(spec) {
   err('');
   pinned = false;
   api('PUT', '/source', spec).then(refresh).catch(e => err(e.message));
-}
-
-function applyPattern() {
-  setSource({source: 'pattern', pattern: chosen.id,
-    bayer: $('bayer').value, width: +$('w').value, height: +$('h').value,
-    luma_tunnel: $('tun').checked});
 }
 
 /* ---------------- crop editor ------------------------------------------- */
@@ -481,12 +461,6 @@ function seedFrom(src) {   // open showing what is on the wire, once
     if (src.gain != null) $('cgain').value = src.gain;
     $('ctun').checked = !!src.luma_tunnel;
     chosen = {kind: 'camera', id: 0};
-  } else if (src.source === 'pattern') {
-    if (src.bayer) $('bayer').value = src.bayer;
-    if (src.width) $('w').value = src.width;
-    if (src.height) $('h').value = src.height;
-    $('tun').checked = !!src.luma_tunnel;
-    chosen = {kind: 'pattern', id: src.pattern || 'counting'};
   } else if (src.source === 'file') {
     chosen = {kind: 'file', id: src.file};
   } else {
