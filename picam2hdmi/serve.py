@@ -49,7 +49,7 @@ class _Stop(Exception):
 POWEROFF = ("systemctl", "poweroff")
 
 
-def _png_gray(img) -> bytes:
+def _png_gray(img, level: int = 6) -> bytes:
     """A grayscale-8 PNG from a 2-D uint8 array, stdlib only.
 
     A PNG is four chunks and a zlib stream; an instrument page needs
@@ -66,10 +66,10 @@ def _png_gray(img) -> bytes:
     header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
     rows = b"".join(b"\x00" + bytes(img[r]) for r in range(height))
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
-            + chunk(b"IDAT", zlib.compress(rows, 6)) + chunk(b"IEND", b""))
+            + chunk(b"IDAT", zlib.compress(rows, level)) + chunk(b"IEND", b""))
 
 
-def _container_preview(container) -> bytes:
+def _container_preview(container, level: int = 6) -> bytes:
     """Decode a container and render its raw samples as a grayscale PNG."""
     import numpy as np
     from bayerlink import decode_frame
@@ -79,7 +79,7 @@ def _container_preview(container) -> bytes:
         shown = (raw >> (header.bits - 8)).astype(np.uint8)
     else:
         shown = raw.astype(np.uint8)
-    return _png_gray(shown)
+    return _png_gray(shown, level)
 
 
 def _parse_mode(text: str) -> tuple[int, int, int]:
@@ -480,6 +480,39 @@ def _handler(supervisor: Supervisor):
             if self.path == "/recordings":
                 return self._send(200, {"recordings":
                                         supervisor.status()["spool"]})
+            if self.path == "/preview.stream":
+                # Push, don't poll: multipart/x-mixed-replace is the
+                # oldest live-view trick on the web and still the best
+                # fit for an instrument -- the browser renders parts as
+                # they arrive, no script in the loop. Paced to ~10 fps
+                # and skipping unchanged frames, so a long exposure
+                # costs bandwidth only when a new frame exists. Cheap
+                # compression: on a LAN, CPU is scarcer than bytes.
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "multipart/x-mixed-replace; boundary=frame")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                last = None
+                try:
+                    while True:
+                        container = supervisor.preview_container
+                        if container is None or container is last:
+                            time.sleep(0.05)
+                            continue
+                        last = container
+                        try:
+                            png = _container_preview(container, level=1)
+                        except ValueError:
+                            time.sleep(0.2)
+                            continue
+                        self.wfile.write(
+                            b"--frame\r\nContent-Type: image/png\r\n"
+                            + f"Content-Length: {len(png)}\r\n\r\n".encode()
+                            + png + b"\r\n")
+                        time.sleep(0.1)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return
             if self.path.startswith("/preview.png"):
                 _, _, query = self.path.partition("?")
                 container = supervisor.preview_container

@@ -59,7 +59,10 @@
                 linear-gradient(#161b22 1px, transparent 1px),
                 linear-gradient(90deg, #161b22 1px, transparent 1px);
               background-size: 10% 10%; }
-  #wirewin { position: absolute; pointer-events: none; display: none; }
+  #wirewin { position: absolute; pointer-events: none; display: none;
+             overflow: hidden; }
+  #wirewin img { width: 100%; height: 100%; display: block;
+                 image-rendering: pixelated; }
   #cropbox { position: absolute; border: 2px solid #3fb950;
              background: rgba(63, 185, 80, .12); cursor: grab;
              box-sizing: border-box; }
@@ -125,7 +128,7 @@
       onchange="drawCrop(); applyFromFields()"> luma tunnel</label>
 
     <div id="croparea">
-      <div id="wirewin"></div>
+      <div id="wirewin"><img id="wireimg" alt=""></div>
       <div id="cropbox">
         <div class="handle h-n"  data-h="n"></div>
         <div class="handle h-s"  data-h="s"></div>
@@ -267,8 +270,7 @@ function modeChanged() {
   sensor = {w, h};
   crop = {x: 0, y: 0, w, h};   // old-mode coordinates mean nothing here
   useSelection = false;
-  view = null;          // another mode's image would sit at wrong scale
-  wire = null;
+  wire = null;          // another mode's stream would sit at wrong scale
   drawCrop();
 }
 
@@ -304,8 +306,7 @@ function windowMode(sel) {
   if (wire) applyCamera();     // live: retarget, same as a drag release
 }
 
-let view = null;   // the emitted window's image, when the camera streams
-let wire = null;   // WHERE that window sits, in sensor coordinates
+let wire = null;   // WHERE the emitted window sits, in sensor coordinates
 
 function drawCrop() {
   const area = $('croparea');
@@ -325,16 +326,21 @@ function drawCrop() {
   // The live image is pinned to the window ON THE WIRE; the green box
   // is the pending selection. They coincide exactly when what you drew
   // is what is streaming -- resizing the box never scales the picture.
+  // The image itself is the instrument's PUSH stream: the browser
+  // renders frames as they arrive, no polling script in the loop.
   const wirewin = $('wirewin');
-  if (view && wire) {
+  const wireimg = $('wireimg');
+  if (wire) {
     wirewin.style.display = 'block';
     wirewin.style.left = wire.x * scale + 'px';
     wirewin.style.top = wire.y * scale + 'px';
     wirewin.style.width = wire.w * scale + 'px';
     wirewin.style.height = wire.h * scale + 'px';
-    wirewin.style.background = `url(${view}) 0 0 / 100% 100%`;
+    if (!wireimg.getAttribute('src'))
+      wireimg.src = '/preview.stream';
   } else {
     wirewin.style.display = 'none';
+    if (wireimg.getAttribute('src')) wireimg.removeAttribute('src');
   }
   const win = effective();
   const applied = wire && win.x === wire.x && win.y === wire.y &&
@@ -461,25 +467,6 @@ let lastSpec = '';
 let followed = '';
 let pinned = false;   // a spool preview holds the section open
 
-function fetchView(retries) {
-  const img = new Image();
-  img.onload = () => {
-    // An image is only the wire's picture if its pixels say so: a
-    // stale stash from before a crop change has the OLD dimensions,
-    // and painting it would stretch the old window into the new box.
-    if (wire && img.naturalWidth === wire.w
-             && img.naturalHeight === wire.h) {
-      view = img.src;
-      drawCrop();
-    } else {
-      if (view) { view = null; drawCrop(); }   // bare box beats a lie
-      if (wire && retries > 0)
-        setTimeout(() => fetchView(retries - 1), 300);
-    }
-  };
-  img.src = '/preview.png?' + Date.now();
-}
-
 function followWire(src) {
   // The panel MIRRORS the instrument -- always, not just at load. The
   // keeper revives retained intent, other clients switch sources, and a
@@ -551,20 +538,27 @@ async function refresh() {
   const modeMatches = live && (src.cam_mode || [sensor.w, sensor.h])
                         .join('x') === $('cmode').value;
   if (modeMatches) {
-    wire = src.crop ? {x: src.crop[0], y: src.crop[1],
-                       w: src.crop[2], h: src.crop[3]}
-                    : {x: 0, y: 0, w: sensor.w, h: sensor.h};
-    fetchView(1);
-  } else if (view || wire) {
-    view = null;
+    const now = src.crop ? {x: src.crop[0], y: src.crop[1],
+                            w: src.crop[2], h: src.crop[3]}
+                         : {x: 0, y: 0, w: sensor.w, h: sensor.h};
+    if (!wire || now.x !== wire.x || now.y !== wire.y ||
+        now.w !== wire.w || now.h !== wire.h) {
+      wire = now;
+      drawCrop();
+    }
+  } else if (wire) {
     wire = null;
     drawCrop();
   }
   if (!live && specNow !== lastSpec) {
     lastSpec = specNow;
-    $('preview').src = s.running ? '/preview.png?' + Date.now() : '';
+    $('preview').src = s.running ? '/preview.stream' : '';
     $('previewcap').textContent = s.running ?
-      'decoded raw samples of the emitted container' : 'nothing streaming';
+      'decoded raw samples of the emitted container, live' : 'nothing streaming';
+  }
+  if (live && !pinned && $('preview').getAttribute('src')) {
+    $('preview').removeAttribute('src');   // one stream at a time
+    lastSpec = '';
   }
   spool = s.spool;
   renderSources();
@@ -607,7 +601,4 @@ refresh();
 fetchCameras();
 setInterval(refresh, 1500);
 setInterval(fetchCameras, 30000);   // a reseated ribbon shows up by itself
-// The live window refreshes faster than the status: the image is tiny
-// (just the crop), so a quick poll is cheap -- ~2-3 fps in the box.
-setInterval(() => { if (wire && !drag) fetchView(0); }, 400);
 </script>
