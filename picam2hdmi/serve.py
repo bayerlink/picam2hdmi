@@ -149,7 +149,24 @@ class Supervisor:
             self.preview_container = None
             self._persist()
             return
+        from .kms import DisplayNotReady
+
         mode_text = spec.get("mode", self.default_mode)
+        try:
+            return self._start_source(spec, mode_text)
+        except DisplayNotReady:
+            # The display being dark is a STATE, not a verdict on the
+            # request: on a bench, cables come and go. The choice becomes
+            # the retained intent -- the keeper realises it the moment a
+            # display appears -- and the refusal still goes back to the
+            # caller so the panel says why nothing is on the wire yet.
+            self._persist_intent(dict(spec, mode=mode_text))
+            raise
+
+    def _start_source(self, spec: dict, mode_text: str) -> None:
+        from . import output
+
+        source = spec.get("source")
         mode = _parse_mode(mode_text)
         display = (mode[0], mode[1])
         tunnel = bool(spec.get("luma_tunnel", False))
@@ -281,9 +298,14 @@ class Supervisor:
 
     def _persist(self) -> None:
         """State retention, best-effort: streaming is the job, not this."""
+        self._persist_intent(self.spec)
+
+    def _persist_intent(self, spec: dict) -> None:
+        """Record what the instrument should be doing, which is not always
+        what it IS doing: a source chosen while the display is dark is
+        intent too, and the keeper realises it when the bench allows."""
         try:
-            (self.spool / "last-source.json").write_text(
-                json.dumps(self.spec))
+            (self.spool / "last-source.json").write_text(json.dumps(spec))
         except OSError:
             pass
 

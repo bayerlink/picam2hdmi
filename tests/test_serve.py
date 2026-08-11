@@ -262,3 +262,40 @@ def test_cameras_endpoint_lists_or_is_empty(instrument):
     code, body = _request(port, "GET", "/cameras")
     assert code == 200
     assert isinstance(body["cameras"], list)   # no camera stack here: []
+
+
+def test_a_choice_made_in_the_dark_is_kept_as_intent(instrument, monkeypatch):
+    """A dark display refuses the START, not the CHOICE.
+
+    Choosing a source while the cable is out must still become the
+    retained intent -- the keeper realises it the moment a display
+    appears -- while a genuinely bad request is refused AND forgotten.
+    """
+    from picam2hdmi import output
+    from picam2hdmi.kms import DisplayNotReady
+
+    supervisor, port = instrument
+    real = output.pattern_frames
+
+    def dark(*args, **kwargs):
+        raise DisplayNotReady("no connected connector with modes")
+    monkeypatch.setattr(output, "pattern_frames", dark)
+
+    wanted = {"source": "pattern", "pattern": "counting",
+              "width": 16, "height": 4, "bayer": "RGGB"}
+    code, body = _request(port, "PUT", "/source", wanted)
+    assert code == 400 and "connector" in body["error"]
+    assert supervisor.status()["running"] is False
+    stored = supervisor.stored_spec()
+    assert stored["source"] == "pattern" and stored["pattern"] == "counting"
+
+    # A bad REQUEST is a different animal: refused and not retained.
+    code, body = _request(port, "PUT", "/source", {"source": "file",
+                                                   "file": "nope.txt"})
+    assert code == 400
+    assert supervisor.stored_spec()["source"] == "pattern"
+
+    # The display comes back; one keeper beat realises the intent.
+    monkeypatch.setattr(output, "pattern_frames", real)
+    assert supervisor.revive_once() is True
+    assert supervisor.status()["running"] is True

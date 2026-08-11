@@ -45,6 +45,12 @@ class ModeInfo(ctypes.Structure):
                 ("name", ctypes.c_char * 32)]          # 68 bytes
 
 
+
+class DisplayNotReady(RuntimeError):
+    """The bench has no lit display RIGHT NOW -- a state, not a
+    mistake. Callers that hold an intent may keep it and try again;
+    everything else treats it as the RuntimeError it also is."""
+
 class CardRes(ctypes.Structure):
     _fields_ = [("fb_id_ptr", u64), ("crtc_id_ptr", u64),
                 ("connector_id_ptr", u64), ("encoder_id_ptr", u64),
@@ -257,7 +263,7 @@ class Card:
             if chosen is None or (hdmi and not chosen[3]):
                 chosen = (cid, conn, modes, hdmi)
         if chosen is None:
-            raise RuntimeError(
+            raise DisplayNotReady(
                 "no connected connector with modes"
                 + (f" (id {connector_id})" if connector_id else "")
                 + "; is the cable in and the receiver awake?")
