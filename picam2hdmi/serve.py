@@ -119,6 +119,10 @@ class Supervisor:
         alive = self._thread is not None and self._thread.is_alive()
         return {
             "source": self.spec if alive else {"source": "off"},
+            # What the instrument INTENDS to stream -- differs from
+            # `source` only while idle (a dark display, a camera still
+            # enumerating). The panel mirrors this, never its own copy.
+            "intent": self.stored_spec() or {"source": "off"},
             "running": alive,
             "frames": self._frames,
             "uptime_s": round(time.monotonic() - self._started, 1)

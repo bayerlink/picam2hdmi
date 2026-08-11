@@ -458,7 +458,7 @@ function applyCamera() {
 /* ---------------- status / preview / spool ------------------------------- */
 
 let lastSpec = '';
-let seeded = false;
+let followed = '';
 let pinned = false;   // a spool preview holds the section open
 
 function fetchView(retries) {
@@ -480,8 +480,23 @@ function fetchView(retries) {
   img.src = '/preview.png?' + Date.now();
 }
 
-function seedFrom(src) {   // open showing what is on the wire, once
-  seeded = true;
+function followWire(src) {
+  // The panel MIRRORS the instrument -- always, not just at load. The
+  // keeper revives retained intent, other clients switch sources, and a
+  // panel holding a stale copy of the fields would re-apply it on the
+  // next click, silently overwriting what the wire restored. The only
+  // thing that pauses following is the user's own gesture in flight.
+  const now = JSON.stringify(src);
+  if (now === followed || drag) return;
+  const active = document.activeElement;
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'SELECT')
+      && $('pane-camera').contains(active)) return;
+  followed = now;
+  seedFrom(src);
+  renderSources();
+}
+
+function seedFrom(src) {
   if (src.source === 'camera') {
     seedCameraFields(src);
     if (src.crop) {
@@ -506,7 +521,10 @@ async function refresh() {
   catch (e) { err('instrument unreachable: ' + e.message); return; }
   $('led').className = s.last_error ? 'err' : (s.running ? 'on' : '');
   const src = s.source || {};
-  if (!seeded) seedFrom(src);
+  // Mirror the stream when there is one, the retained INTENT when there
+  // is not: an idle panel showing "None" over a parked camera intent
+  // invites a default-valued click that would overwrite it.
+  followWire(s.running ? src : (s.intent || {source: 'off'}));
   $('facts').textContent =
     (s.running ? `${src.source}${src.pattern ? ' ' + src.pattern : ''}` +
       `${src.file ? ' ' + src.file : ''}` +
