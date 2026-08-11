@@ -59,6 +59,16 @@ picam2hdmi pattern --mode counting --width 2028 --height 1078 --out frame.npy
 That file is bit-for-bit what the HDMI link will carry — receivers can be
 built and tested against it before any cable exists.
 
+The same file IS a test pattern for the instrument: drop it into the
+panel's recordings and it streams like any capture, at whatever geometry
+you generated. Replay re-stamps the frame counter, so a single-frame
+pattern file plays as a proper continuous stream:
+
+```bash
+picam2hdmi pattern --mode checker --width 512 --height 240 --out checker_512x240.npy
+# then drag it into the panel at http://<pi>:8080/
+```
+
 On a Pi, **[SETUP.md](SETUP.md)** is the step-by-step from blank SD card to
 streaming instrument (or `contrib/install.sh` does the install in one go).
 The short of it:
