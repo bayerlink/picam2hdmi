@@ -119,6 +119,7 @@
     <label>exposure µs <input id="cexp" type="number" value="30000"></label>
     <label>gain <input id="cgain" type="number" step="0.1" value="4.0"></label>
     <label><input id="ctun" type="checkbox" onchange="drawCrop()"> luma tunnel</label>
+    <button class="go" onclick="applyCamera()">Apply</button>
 
     <div id="croparea">
       <div id="wirewin"></div>
@@ -136,7 +137,6 @@
     <div id="cropinfo"></div>
     <div id="budget"></div>
     <br>
-    <button class="go" onclick="applyCamera()">Apply</button>
     <span class="seg">
       <button id="win-full" onclick="windowMode(false)">Full frame</button>
       <button id="win-sel" onclick="windowMode(true)">Selection</button>
