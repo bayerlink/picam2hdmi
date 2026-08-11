@@ -112,14 +112,17 @@
 <main>
   <div id="left">
   <div class="card" id="pane-camera">
-    <label>sensor mode <select id="cmode" onchange="modeChanged()">
+    <label>sensor mode <select id="cmode"
+      onchange="modeChanged(); applyFromFields()">
       <option value="1296x972">1296x972 (binned)</option>
       <option value="2592x1944">2592x1944 (full, crop to fit)</option>
       <option value="640x480">640x480</option></select></label>
-    <label>exposure µs <input id="cexp" type="number" value="30000"></label>
-    <label>gain <input id="cgain" type="number" step="0.1" value="4.0"></label>
-    <label><input id="ctun" type="checkbox" onchange="drawCrop()"> luma tunnel</label>
-    <button class="go" onclick="applyCamera()">Apply</button>
+    <label>exposure µs <input id="cexp" type="number" value="30000"
+      onchange="applyFromFields()"></label>
+    <label>gain <input id="cgain" type="number" step="0.1" value="4.0"
+      onchange="applyFromFields()"></label>
+    <label><input id="ctun" type="checkbox"
+      onchange="drawCrop(); applyFromFields()"> luma tunnel</label>
 
     <div id="croparea">
       <div id="wirewin"></div>
@@ -268,6 +271,23 @@ function modeChanged() {
   drawCrop();
 }
 
+function seedCameraFields(src) {
+  if (src.cam_mode) {
+    const value = src.cam_mode.join('x');
+    if ($('cmode').value !== value) { $('cmode').value = value; modeChanged(); }
+  }
+  if (src.exposure_us != null) $('cexp').value = src.exposure_us;
+  if (src.gain != null) $('cgain').value = src.gain;
+  $('ctun').checked = !!src.luma_tunnel;
+}
+
+function applyFromFields() {
+  // Fields commit themselves (change fires on Enter or leaving the
+  // field) -- but only a user's edit lands here: scripted .value writes
+  // fire no events, so seeding never re-applies what it just read.
+  if (chosen && chosen.kind === 'camera') applyCamera();
+}
+
 function windowMode(sel) {
   if (useSelection === sel) { drawCrop(); return; }
   useSelection = sel;
@@ -410,13 +430,19 @@ function applyCamera() {
   pinned = false;
   api('PUT', '/source', spec).then(refresh).catch(e => {
     err(e.message);
-    // A refused window must not linger: snap back to the wire's reality
-    // -- mode AND box -- or every later gesture re-fails the same way.
+    // A refused change must not linger ANYWHERE on the panel: snap the
+    // window back to the wire's reality, and the fields back to the
+    // spec that is actually streaming -- or every later gesture
+    // re-fails the same way.
     if (wire) {
       useSelection = !coversSensor(wire);
       if (useSelection) crop = {...wire};
       drawCrop();
     }
+    api('GET', '/status').then(s => {
+      const src = s.source || {};
+      if (src.source === 'camera') seedCameraFields(src);
+    }).catch(() => {});
   });
 }
 
@@ -448,8 +474,7 @@ function fetchView(retries) {
 function seedFrom(src) {   // open showing what is on the wire, once
   seeded = true;
   if (src.source === 'camera') {
-    if (src.cam_mode) $('cmode').value = src.cam_mode.join('x');
-    modeChanged();
+    seedCameraFields(src);
     if (src.crop) {
       crop = {x: src.crop[0], y: src.crop[1],
               w: src.crop[2], h: src.crop[3]};
@@ -457,9 +482,6 @@ function seedFrom(src) {   // open showing what is on the wire, once
       // MODE that is follows from whether it covers the sensor.
       useSelection = !coversSensor(crop);
     }
-    if (src.exposure_us != null) $('cexp').value = src.exposure_us;
-    if (src.gain != null) $('cgain').value = src.gain;
-    $('ctun').checked = !!src.luma_tunnel;
     chosen = {kind: 'camera', id: 0};
   } else if (src.source === 'file') {
     chosen = {kind: 'file', id: src.file};
