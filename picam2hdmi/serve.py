@@ -473,11 +473,15 @@ def _handler(supervisor: Supervisor):
 def serve(bind: str, port: int, supervisor: Supervisor,
           autostart: dict | None = None) -> None:
     if autostart:
-        # An appliance boots into its source. Early boot is exactly when
-        # a camera may not be ready yet, so the one retry-loop in the
-        # codebase lives here -- and gives up into a running, idle,
-        # controllable daemon with the reason in last_error.
-        for attempt in range(3):
+        # An appliance boots into its source, and early boot is exactly
+        # when its neighbours are not ready: the camera stack settling, or
+        # a capture stick that enumerates its HDMI seconds after power.
+        # So the one retry-loop in the codebase lives here, and it is
+        # PATIENT -- a display that wakes up late should cost seconds,
+        # not the boot. It still gives up (into a running, idle,
+        # controllable daemon with the reason in last_error) rather than
+        # crash-looping forever.
+        for attempt in range(60):
             try:
                 supervisor.start(autostart)
                 break
