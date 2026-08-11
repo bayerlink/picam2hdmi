@@ -51,7 +51,12 @@
   #cropbox { position: absolute; border: 2px solid #3fb950;
              background: rgba(63, 185, 80, .12); cursor: grab;
              box-sizing: border-box; }
-  #cropbox.full { border-style: dashed; }
+  .seg { display: inline-flex; }
+  .seg button { border-radius: 0; }
+  .seg button:first-child { border-radius: 6px 0 0 6px; }
+  .seg button:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+  .seg button.sel { color: #e6edf3; border-color: #3fb950;
+                    background: rgba(63, 185, 80, .15); }
   .handle { position: absolute; width: 14px; height: 14px;
             background: #3fb950; border-radius: 3px; margin: -7px; }
   .h-n { top: 0; left: 50%; cursor: ns-resize; }
@@ -142,7 +147,10 @@
     <div id="budget"></div>
     <br>
     <button class="go" onclick="applyCamera()">Stream camera</button>
-    <button onclick="fullFrame()">Full frame</button>
+    <span class="seg">
+      <button id="win-full" onclick="windowMode(false)">Full frame</button>
+      <button id="win-sel" onclick="windowMode(true)">Selection</button>
+    </span>
   </div>
 
   <div class="tab" id="pane-replay">
@@ -203,23 +211,33 @@ function applyPattern() {
 
 let sensor = {w: 1296, h: 972};
 let crop = {x: 0, y: 0, w: 1296, h: 972};          // sensor coordinates
+// Full frame and Selection are two WINDOWS the user toggles between; the
+// selection box is state that survives the toggle, so switching to full
+// frame parks it rather than destroying it.
+let useSelection = false;
+const effective = () => useSelection ? crop
+                                     : {x: 0, y: 0, w: sensor.w, h: sensor.h};
+const coversSensor = r => r.x === 0 && r.y === 0 &&
+                          r.w === sensor.w && r.h === sensor.h;
 const GX = 4, GY = 2, MINW = 16, MINH = 16;
 const SLOTS = 2200, TUNNEL_LINE_BYTES = 144 - 10;  // inner bytes, minus slack
 
 function modeChanged() {
   const [w, h] = $('cmode').value.split('x').map(Number);
   sensor = {w, h};
-  crop = {x: 0, y: 0, w, h};
+  crop = {x: 0, y: 0, w, h};   // old-mode coordinates mean nothing here
+  useSelection = false;
   view = null;          // another mode's image would sit at wrong scale
   wire = null;
   drawCrop();
 }
 
-function fullFrame() { crop = {x: 0, y: 0, w: sensor.w, h: sensor.h};
-                       drawCrop(); }
-
-function isFull() { return crop.x === 0 && crop.y === 0 &&
-                    crop.w === sensor.w && crop.h === sensor.h; }
+function windowMode(sel) {
+  if (useSelection === sel) { drawCrop(); return; }
+  useSelection = sel;
+  drawCrop();
+  if (wire) applyCamera();     // live: retarget, same as a drag release
+}
 
 let view = null;   // the emitted window's image, when the camera streams
 let wire = null;   // WHERE that window sits, in sensor coordinates
@@ -231,11 +249,13 @@ function drawCrop() {
   area.style.height = height + 'px';
   const scale = width / sensor.w;
   const box = $('cropbox');
+  box.style.display = useSelection ? 'block' : 'none';
   box.style.left = crop.x * scale + 'px';
   box.style.top = crop.y * scale + 'px';
   box.style.width = crop.w * scale + 'px';
   box.style.height = crop.h * scale + 'px';
-  box.classList.toggle('full', isFull());
+  $('win-full').classList.toggle('sel', !useSelection);
+  $('win-sel').classList.toggle('sel', useSelection);
   // The live image is pinned to the window ON THE WIRE; the green box
   // is the pending selection. They coincide exactly when what you drew
   // is what is streaming -- resizing the box never scales the picture.
@@ -250,25 +270,26 @@ function drawCrop() {
   } else {
     wirewin.style.display = 'none';
   }
-  const applied = wire && crop.x === wire.x && crop.y === wire.y &&
-                  crop.w === wire.w && crop.h === wire.h;
+  const win = effective();
+  const applied = wire && win.x === wire.x && win.y === wire.y &&
+                  win.w === wire.w && win.h === wire.h;
   box.style.background = applied ? 'transparent' : '';
-  $('cropinfo').innerHTML =
-    `crop <b>${crop.w}×${crop.h}</b> at <b>+${crop.x}+${crop.y}</b>` +
-    (isFull() ? ' (full frame)' : '') +
+  $('cropinfo').innerHTML = (useSelection
+    ? `selection <b>${crop.w}×${crop.h}</b> at <b>+${crop.x}+${crop.y}</b>`
+    : `full frame <b>${sensor.w}×${sensor.h}</b>`) +
     ` — sensor ${sensor.w}×${sensor.h}` +
-    (wire && !applied ? ' — applies on release' : '');
+    (useSelection && wire && !applied ? ' — applies on release' : '');
   const tunnel = $('ctun').checked;
-  const lineBytes = Math.ceil(crop.w * 5 / 4);
+  const lineBytes = Math.ceil(win.w * 5 / 4);
   let msg, ok;
   if (tunnel) {
     ok = lineBytes <= TUNNEL_LINE_BYTES;
     msg = ok ? `fits the luma tunnel (${lineBytes} of ${TUNNEL_LINE_BYTES} bytes/line)`
              : `too wide for the tunnel: ${lineBytes} bytes/line > ${TUNNEL_LINE_BYTES} — narrow the crop`;
   } else {
-    ok = crop.w <= SLOTS;
-    msg = ok ? `within the 1080p rate budget (${crop.w} of ${SLOTS} slots)`
-             : `exceeds the 1080p rate budget: ${crop.w} > ${SLOTS} slots — narrow the crop`;
+    ok = win.w <= SLOTS;
+    msg = ok ? `within the 1080p rate budget (${win.w} of ${SLOTS} slots)`
+             : `exceeds the 1080p rate budget: ${win.w} > ${SLOTS} slots — narrow the crop`;
   }
   const budget = $('budget');
   budget.textContent = msg;
@@ -289,6 +310,7 @@ $('croparea').addEventListener('pointerdown', e => {
           sx: e.clientX, sy: e.clientY, scale,
           start: {...crop}};
   if (drag.mode === 'new') {                 // draw a fresh box from here
+    useSelection = true;                     // drawing IS choosing Selection
     const rect = area.getBoundingClientRect();
     const px = snapX(clamp((e.clientX - rect.left) * scale, 0,
                            sensor.w - MINW));
@@ -331,8 +353,9 @@ $('croparea').addEventListener('pointermove', e => {
   drawCrop();
 });
 $('croparea').addEventListener('pointerup', () => {
-  const moved = drag && wire && (crop.x !== wire.x || crop.y !== wire.y ||
-                                 crop.w !== wire.w || crop.h !== wire.h);
+  const moved = drag && useSelection && wire &&
+                (crop.x !== wire.x || crop.y !== wire.y ||
+                 crop.w !== wire.w || crop.h !== wire.h);
   drag = null;
   if (moved) applyCamera();   // geometry-only: the daemon retargets live
 });
@@ -343,16 +366,20 @@ function applyCamera() {
   const spec = {source: 'camera',
     cam_mode: $('cmode').value.split('x').map(Number),
     luma_tunnel: $('ctun').checked};
-  if (!isFull()) spec.crop = [crop.x, crop.y, crop.w, crop.h];
+  if (useSelection) spec.crop = [crop.x, crop.y, crop.w, crop.h];
   if ($('cexp').value !== '') spec.exposure_us = +$('cexp').value;
   if ($('cgain').value !== '') spec.gain = +$('cgain').value;
   err('');
   pinned = false;
   api('PUT', '/source', spec).then(refresh).catch(e => {
     err(e.message);
-    // A refused window must not linger as the box: snap back to the
-    // wire's reality, or every later gesture re-fails the same way.
-    if (wire) { crop = {...wire}; drawCrop(); }
+    // A refused window must not linger: snap back to the wire's reality
+    // -- mode AND box -- or every later gesture re-fails the same way.
+    if (wire) {
+      useSelection = !coversSensor(wire);
+      if (useSelection) crop = {...wire};
+      drawCrop();
+    }
   });
 }
 
@@ -386,8 +413,11 @@ function seedFrom(src) {   // open showing what is on the wire, once
   if (src.source === 'camera') {
     if (src.cam_mode) $('cmode').value = src.cam_mode.join('x');
     modeChanged();
-    if (src.crop) crop = {x: src.crop[0], y: src.crop[1],
-                          w: src.crop[2], h: src.crop[3]};
+    if (src.crop) {
+      crop = {x: src.crop[0], y: src.crop[1],
+              w: src.crop[2], h: src.crop[3]};
+      useSelection = true;
+    }
     if (src.exposure_us != null) $('cexp').value = src.exposure_us;
     if (src.gain != null) $('cgain').value = src.gain;
     $('ctun').checked = !!src.luma_tunnel;
