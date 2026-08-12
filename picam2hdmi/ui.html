@@ -170,6 +170,7 @@
 </footer>
 
 <script>
+const PANEL = '@PANEL@';   // stamped by the daemon at serve time
 const $ = id => document.getElementById(id);
 const err = m => $('err').textContent = m || '';
 
@@ -507,6 +508,14 @@ async function refresh() {
   try { s = await api('GET', '/status'); }
   catch (e) { err('instrument unreachable: ' + e.message); return; }
   $('led').className = s.last_error ? 'err' : (s.running ? 'on' : '');
+  if (s.panel && PANEL.length === 12 && s.panel !== PANEL
+      && sessionStorage.reloadedFor !== s.panel) {
+    // This tab outlived a deploy. Reload ONCE per new panel (the
+    // marker prevents a loop if something upstream rewrites pages).
+    sessionStorage.reloadedFor = s.panel;
+    location.reload();
+    return;
+  }
   const src = s.source || {};
   // Mirror the stream when there is one, the retained INTENT when there
   // is not: an idle panel showing "None" over a parked camera intent

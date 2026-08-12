@@ -321,3 +321,13 @@ def test_capture_freezes_the_emitted_frame_into_the_spool(instrument):
                        {"source": "file", "file": "capture-001.npy"})
     assert code == 200
     assert supervisor.status()["running"] is True
+
+
+def test_the_panel_is_stamped_and_status_names_the_stamp(instrument):
+    _, port = instrument
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/")
+    page = conn.getresponse().read().decode()
+    assert "@PANEL@" not in page             # stamped, not the placeholder
+    code, status = _request(port, "GET", "/status")
+    assert code == 200 and status["panel"] in page

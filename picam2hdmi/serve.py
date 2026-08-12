@@ -82,6 +82,13 @@ def _container_preview(container, level: int = 6) -> bytes:
     return _png_gray(shown, level)
 
 
+def _panel_hash() -> str:
+    import hashlib
+
+    return hashlib.md5(
+        (Path(__file__).parent / "ui.html").read_bytes()).hexdigest()[:12]
+
+
 def _parse_mode(text: str) -> tuple[int, int, int]:
     size, _, hz = text.partition("@")
     width, _, height = size.partition("x")
@@ -124,6 +131,7 @@ class Supervisor:
             # enumerating). The panel mirrors this, never its own copy.
             "intent": self.stored_spec() or {"source": "off"},
             "running": alive,
+            "panel": _panel_hash(),
             "frames": self._frames,
             "uptime_s": round(time.monotonic() - self._started, 1)
             if alive and self._started else 0,
@@ -460,6 +468,11 @@ def _handler(supervisor: Supervisor):
         def do_GET(self):
             if self.path in ("/", "/index.html"):
                 page = (Path(__file__).parent / "ui.html").read_bytes()
+                # Stamp the page with its own hash; status reports the
+                # current one. A tab that outlives a deploy sees the
+                # mismatch and reloads itself -- a stale panel is how a
+                # stale spec gets re-applied to a live stream.
+                page = page.replace(b"@PANEL@", _panel_hash().encode())
                 return self._send_bytes(200, page, "text/html; charset=utf-8")
             if self.path == "/status":
                 return self._send(200, supervisor.status())
