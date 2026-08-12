@@ -527,7 +527,8 @@ async function refresh() {
       `${src.width ? ' ' + src.width + 'x' + src.height : ''}` +
       `${src.crop ? ' crop ' + src.crop[2] + 'x' + src.crop[3] : ''}` +
       `${src.luma_tunnel ? ' (tunnel)' : ''}` +
-      `${src.mode ? ' @ ' + src.mode : ''}` : 'idle') +
+      `${src.mode ? ' @ ' + src.mode : ''}` +
+      `${s.display === false ? ' — no display, monitoring' : ''}` : 'idle') +
     ` · ${s.frames} frames · ${Math.round(s.uptime_s)}s`;
   if (s.last_error) err(s.last_error);
   liveKey = !s.running ? 'off:0'

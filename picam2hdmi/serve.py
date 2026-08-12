@@ -119,6 +119,9 @@ class Supervisor:
         self.preview_container = None
         self._camera_ref = None
         self._start_lock = threading.Lock()
+        # True while the source runs WITHOUT a display: framing,
+        # focusing, setting exposure -- everything but the wire.
+        self.monitoring = False
 
     # -- facts ---------------------------------------------------------------
 
@@ -131,6 +134,10 @@ class Supervisor:
             # enumerating). The panel mirrors this, never its own copy.
             "intent": self.stored_spec() or {"source": "off"},
             "running": alive,
+            # Whether the WIRE is being driven: False while idle, and
+            # False in monitor mode -- the panel says so instead of
+            # letting a live viewfinder imply a fed receiver.
+            "display": alive and not self.monitoring,
             "panel": _panel_hash(),
             "frames": self._frames,
             "uptime_s": round(time.monotonic() - self._started, 1)
@@ -274,7 +281,8 @@ class Supervisor:
         self._started = time.monotonic()
         self._frames_gen = frames
         self._thread = threading.Thread(
-            target=self._run, args=(frames, mode), daemon=True)
+            target=self._run, args=(frames, mode, source != "camera"),
+            daemon=True)
         self._thread.start()
         self._persist()
 
@@ -413,7 +421,9 @@ class Supervisor:
             # (the camera) must be free before the next source opens it.
             generator.close()
 
-    def _run(self, frames, mode) -> None:
+    def _run(self, frames, mode, pace: bool = False) -> None:
+        from .kms import DisplayNotReady
+
         def on_frame(index):
             self._frames = index
             if self._stop.is_set():
@@ -423,8 +433,44 @@ class Supervisor:
                          card_path=self.card_path, on_frame=on_frame)
         except _Stop:
             pass
+        except DisplayNotReady:
+            self._monitor(frames, mode, pace, on_frame)
         except Exception as error:            # noqa: BLE001 -- reported, not eaten
             self.last_error = f"{type(error).__name__}: {error}"
+
+    def _monitor(self, frames, mode, pace: bool, on_frame) -> None:
+        """The source runs even with no display: a viewfinder needs a
+        sensor, not a receiver.
+
+        Frames are pulled and discarded -- pulling is what makes the
+        camera integrate, the peek feed the live view, and the frame
+        counter tell the truth -- while a cheap sysfs poll watches for
+        a display. The moment one appears this loop simply ENDS: a dead
+        thread plus retained intent is exactly the state the keeper
+        already revives, through the real scanout this time.
+        """
+        from .kms import display_present
+
+        self.monitoring = True
+        self.last_error = None
+        interval = 1.0 / (mode[2] or 30)
+        checked = time.monotonic()
+        try:
+            for index, _ in enumerate(frames):
+                on_frame(index)
+                if pace:
+                    time.sleep(interval)
+                now = time.monotonic()
+                if now - checked >= 1.0:
+                    checked = now
+                    if display_present():
+                        return               # the keeper takes it from here
+        except _Stop:
+            pass
+        except Exception as error:            # noqa: BLE001 -- reported, not eaten
+            self.last_error = f"{type(error).__name__}: {error}"
+        finally:
+            self.monitoring = False
 
 
 def _chain(first, rest):

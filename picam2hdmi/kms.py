@@ -46,6 +46,24 @@ class ModeInfo(ctypes.Structure):
 
 
 
+def display_present() -> bool:
+    """Whether any connector reports a display, straight from sysfs.
+
+    The cheap, no-side-effect form of the question the modeset answers
+    expensively: good for a monitor loop deciding when to hand back to
+    the real scanout, useless for choosing WHICH connector -- that
+    stays the modeset's job."""
+    from pathlib import Path as _Path
+
+    for status in _Path("/sys/class/drm").glob("card*-*/status"):
+        try:
+            if status.read_text().strip() == "connected":
+                return True
+        except OSError:
+            continue
+    return False
+
+
 class DisplayNotReady(RuntimeError):
     """The bench has no lit display RIGHT NOW -- a state, not a
     mistake. Callers that hold an intent may keep it and try again;

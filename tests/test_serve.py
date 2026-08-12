@@ -331,3 +331,47 @@ def test_the_panel_is_stamped_and_status_names_the_stamp(instrument):
     assert "@PANEL@" not in page             # stamped, not the placeholder
     code, status = _request(port, "GET", "/status")
     assert code == 200 and status["panel"] in page
+
+
+def test_the_source_runs_as_a_viewfinder_when_the_display_is_dark(
+        instrument, monkeypatch):
+    """No display does not mean no source: the stream falls back to a
+    monitor loop -- frames flow, the preview feeds, status says the
+    wire is NOT driven -- and the loop ends by itself the moment a
+    display appears, handing the keeper a dead thread and a live
+    intent, which is exactly what it revives."""
+    import time as _time
+
+    from picam2hdmi import kms, serve
+
+    supervisor, port = instrument
+    dark = {"value": True}
+    monkeypatch.setattr(kms, "display_present",
+                        lambda: not dark["value"])
+
+    def blind_runner(frames, mode=None, connector=None, card_path=None,
+                     on_frame=None):
+        raise kms.DisplayNotReady("no connected connector with modes")
+    supervisor._runner = blind_runner
+
+    code, status = _request(port, "PUT", "/source", {
+        "source": "pattern", "pattern": "counting",
+        "width": 16, "height": 4, "bayer": "RGGB"})
+    assert code == 200
+    for _ in range(100):
+        if supervisor.status()["frames"] > 3:
+            break
+        _time.sleep(0.05)
+    status = supervisor.status()
+    assert status["running"] is True and status["display"] is False
+    assert status["frames"] > 3                  # the viewfinder is alive
+
+    # A display appears: the monitor loop ends within its poll second...
+    supervisor._runner = _fake_runner
+    dark["value"] = False
+    supervisor._thread.join(timeout=5)
+    assert not supervisor._thread.is_alive()
+    # ...and one keeper beat brings the same intent up on the real path.
+    assert supervisor.revive_once() is True
+    status = supervisor.status()
+    assert status["running"] is True and status["display"] is True
