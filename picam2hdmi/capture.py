@@ -153,6 +153,14 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
                                                buffer_count=4,
                                                controls=controls)
     picam2.configure(config)
+    # The default video configuration PINS frame duration (33 ms), which
+    # silently truncates any longer exposure -- 40 ms and 50 ms produce
+    # the same picture and no error. Open the limits to the SENSOR'S own
+    # declared range (one owner: its declaration), so exposure stretches
+    # the frame instead, all the way to the mode's multi-second maximum.
+    lo, hi, _ = picam2.camera_controls["FrameDurationLimits"]
+    config["controls"]["FrameDurationLimits"] = (int(lo), int(hi))
+    picam2.configure(config)
     raw_config = picam2.camera_configuration()["raw"]
     fmt = raw_config["format"]
     order, bits = order_from_format(fmt)
@@ -170,6 +178,8 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
                         display=tuple(display), target=tuple(target),
                         crop=(x, y, w, h))
 
+    if crop_ref is not None:
+        crop_ref["picam2"] = picam2   # the live-controls handle
     picam2.start()
     print(f"camera: {fmt} {sensor_w}x{sensor_h}, window {w}x{h}+{x}+{y}, "
           f"AE/AWB off"

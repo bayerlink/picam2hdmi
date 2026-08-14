@@ -435,13 +435,24 @@ $('croparea').addEventListener('pointerup', () => {
 $('croparea').addEventListener('pointercancel', () => drag = null);
 window.addEventListener('resize', drawCrop);
 
+let wireSpec = {source: 'off'};
+
 function applyCamera() {
-  const spec = {source: 'camera',
+  // The panel owns SOME keys; the spec on the wire may carry others
+  // (container, mode, index -- and whatever the future adds). Start
+  // from the wire's spec and overlay only what the panel manages:
+  // a field this page never heard of must survive a parameter edit.
+  const base = (wireSpec && wireSpec.source === 'camera')
+             ? {...wireSpec} : {};
+  const spec = Object.assign(base, {source: 'camera',
     cam_mode: $('cmode').value.split('x').map(Number),
-    luma_tunnel: $('ctun').checked};
+    luma_tunnel: $('ctun').checked});
   if (useSelection) spec.crop = [crop.x, crop.y, crop.w, crop.h];
+  else delete spec.crop;
   if ($('cexp').value !== '') spec.exposure_us = +$('cexp').value;
+  else delete spec.exposure_us;
   if ($('cgain').value !== '') spec.gain = +$('cgain').value;
+  else delete spec.gain;
   err('');
   pinned = false;
   api('PUT', '/source', spec).then(refresh).catch(e => {
@@ -520,7 +531,8 @@ async function refresh() {
   // Mirror the stream when there is one, the retained INTENT when there
   // is not: an idle panel showing "None" over a parked camera intent
   // invites a default-valued click that would overwrite it.
-  followWire(s.running ? src : (s.intent || {source: 'off'}));
+  wireSpec = s.running ? src : (s.intent || {source: 'off'});
+  followWire(wireSpec);
   $('facts').textContent =
     (s.running ? `${src.source}${src.pattern ? ' ' + src.pattern : ''}` +
       `${src.file ? ' ' + src.file : ''}` +

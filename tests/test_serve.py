@@ -14,6 +14,7 @@ from http.server import ThreadingHTTPServer
 
 
 def _fake_runner(frames, mode=None, connector=None, card_path=None,
+                 container=False,
                  on_frame=None):
     """Consume frames like the real scanout, minus the silicon."""
     for index, _ in enumerate(frames):
@@ -184,8 +185,27 @@ def test_crop_only_change_retargets_the_running_camera(instrument):
     assert code == 400 and "display" in body["error"]
     assert supervisor._camera_ref["crop"] == (8, 2, 16, 8)
 
-    # Anything beyond geometry (gain here) is a real restart path.
-    assert not supervisor._crop_only_change(dict(spec, gain=4.0))
+    # Exposure and gain are LIVE-TUNABLE: they ride the same lane as
+    # the window and never touch the world. A gain slider must have no
+    # path to a display-mode negotiation.
+    assert supervisor._crop_only_change(dict(spec, gain=4.0))
+
+    class _Recorder:
+        def __init__(self):
+            self.controls = []
+
+        def set_controls(self, c):
+            self.controls.append(c)
+
+    recorder = _Recorder()
+    supervisor._camera_ref["picam2"] = recorder
+    supervisor._live_controls(dict(spec, gain=4.0))
+    assert recorder.controls[-1]["AnalogueGain"] == 4.0
+    assert supervisor.stored_spec()["gain"] == 4.0
+
+    # The world-touching keys still restart: a different sensor mode
+    # is a different stream.
+    assert not supervisor._crop_only_change(dict(spec, cam_mode=[32, 24]))
     supervisor._thread = None             # hand the fake back untouched
 
 
@@ -198,7 +218,10 @@ def test_state_retention_and_restore(instrument):
 
     # The accepted spec survives in the spool, invisible to /recordings.
     stored = supervisor.stored_spec()
-    assert stored["pattern"] == "gradient" and "mode" in stored
+    assert stored["pattern"] == "gradient"
+    # what was STATED is stored; what was DERIVED is not -- a derived
+    # value written back would become an explicit ask next round trip
+    assert "mode" not in stored
     code, body = _request(port, "GET", "/recordings")
     assert body["recordings"] == []
 
@@ -350,6 +373,7 @@ def test_the_source_runs_as_a_viewfinder_when_the_display_is_dark(
                         lambda: not dark["value"])
 
     def blind_runner(frames, mode=None, connector=None, card_path=None,
+                     container=False,
                      on_frame=None):
         raise kms.DisplayNotReady("no connected connector with modes")
     supervisor._runner = blind_runner
@@ -375,3 +399,36 @@ def test_the_source_runs_as_a_viewfinder_when_the_display_is_dark(
     assert supervisor.revive_once() is True
     status = supervisor.status()
     assert status["running"] is True and status["display"] is True
+
+
+def test_the_container_is_derived_content_plus_one(instrument):
+    """State geometry once; the +1 and the raster are nobody's business."""
+    from picam2hdmi.serve import _Stop
+    import time
+    supervisor, port = instrument
+    calls = []
+
+    def spy(frames, mode=None, connector=None, card_path=None,
+            container=False, on_frame=None):
+        calls.append((mode, container))
+        next(iter(frames))
+        raise _Stop()
+
+    supervisor._runner = spy
+    _request(port, "PUT", "/source",
+             {"source": "pattern", "pattern": "counting",
+              "width": 512, "height": 240, "bayer": "RGGB"})
+    deadline = time.monotonic() + 2
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert calls and calls[0] == ((512, 241, 60), True)
+
+    # an explicit mode still wins, and is not a container
+    calls.clear()
+    _request(port, "PUT", "/source",
+             {"source": "pattern", "pattern": "counting", "width": 512,
+              "height": 240, "bayer": "RGGB", "mode": "1280x720@60"})
+    deadline = time.monotonic() + 2
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert calls and calls[0] == ((1280, 720, 60), False)

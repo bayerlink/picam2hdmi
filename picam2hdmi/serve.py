@@ -115,6 +115,7 @@ class Supervisor:
         self._frames = 0
         self._started = None
         self.spec = {"source": "off"}
+        self.derived = None            # the container the rule chose, if any
         self.last_error = None
         self.preview_container = None
         self._camera_ref = None
@@ -134,6 +135,7 @@ class Supervisor:
             # enumerating). The panel mirrors this, never its own copy.
             "intent": self.stored_spec() or {"source": "off"},
             "running": alive,
+            "derived_container": self.derived,
             # Whether the WIRE is being driven: False while idle, and
             # False in monitor mode -- the panel says so instead of
             # letting a live viewfinder imply a fed receiver.
@@ -170,19 +172,87 @@ class Supervisor:
             return
         from .kms import DisplayNotReady
 
-        mode_text = spec.get("mode", self.default_mode)
+        # An explicit container overrides mode: a private link's frame,
+        # not a display's. Absent both, the container is DERIVED --
+        # content plus the header line, on the first proven raster that
+        # holds it -- so nobody ever types the +1. `mode` remains the
+        # explicit way to ask for a standard display mode.
+        container_text = spec.get("container") or self._derived_container(spec)
+        mode_text = container_text or spec.get("mode", self.default_mode)
+        self.derived = None if spec.get("container") or spec.get("mode") \
+            else mode_text
         try:
-            return self._start_source(spec, mode_text)
+            return self._start_source(spec, mode_text,
+                                      container=bool(container_text))
         except DisplayNotReady:
             # The display being dark is a STATE, not a verdict on the
             # request: on a bench, cables come and go. The choice becomes
             # the retained intent -- the keeper realises it the moment a
             # display appears -- and the refusal still goes back to the
             # caller so the panel says why nothing is on the wire yet.
-            self._persist_intent(dict(spec, mode=mode_text))
+            self._persist_intent(dict(spec))
             raise
 
-    def _start_source(self, spec: dict, mode_text: str) -> None:
+    def _derived_container(self, spec: dict) -> str | None:
+        """content+1 on a proven raster, when the spec states its geometry.
+
+        A pattern states width and height; a camera's stream is its
+        crop. Full-sensor cameras (no crop) keep the explicit paths:
+        their geometry is only known after the sensor opens.
+        """
+        if spec.get("mode"):
+            return None                    # an explicit ask wins
+        source = spec.get("source")
+        if source == "pattern":
+            shape = (int(spec.get("width", 512)),
+                     int(spec.get("height", 240)))
+        elif source == "camera" and spec.get("crop"):
+            shape = (int(spec["crop"][2]), int(spec["crop"][3]))
+        elif source == "file" and spec.get("file"):
+            # A recording IS a container -- header line included -- so
+            # it replays in exactly its own geometry, no +1, no defaults.
+            import numpy as np
+            path = self.spool / str(spec["file"])
+            if not path.exists():
+                return None                # the file path refuses later
+            shape = np.load(path, mmap_mode="r").shape
+            # one container (H, W, 3) or a sequence (N, H, W, 3)
+            height, width = shape[1:3] if len(shape) == 4 else shape[:2]
+            from . import kms
+            for hz in (60, 30):
+                if kms.container_fits(width, height, hz):
+                    return f"{width}x{height}@{hz}"
+            return None
+        else:
+            return None
+        from . import kms
+        width, lines = shape[0], shape[1] + 1
+        for hz in (60, 30):
+            if kms.container_fits(width, lines, hz):
+                return f"{width}x{lines}@{hz}"
+        return None                        # let the explicit paths refuse
+
+    def _live_controls(self, spec: dict) -> None:
+        """Retune the running camera's exposure and gain, live.
+
+        Mid-stream controls land a few frames later -- the interactive
+        contract. The deterministic first-frame contract still exists:
+        it is called restarting the source, and scripts that want it
+        change a non-live key."""
+        ref = self._camera_ref or {}
+        picam2 = ref.get("picam2")
+        controls = {}
+        if spec.get("exposure_us") is not None:
+            controls["ExposureTime"] = int(spec["exposure_us"])
+        if spec.get("gain") is not None:
+            controls["AnalogueGain"] = float(spec["gain"])
+        if picam2 is not None and controls:
+            picam2.set_controls(controls)
+        self.spec = dict(spec)
+        self._persist()
+
+    def _start_source(self, spec: dict, mode_text: str,
+                      container: bool = False) -> None:
         from . import output
 
         source = spec.get("source")
@@ -226,7 +296,8 @@ class Supervisor:
             # camera is already streaming and only the window moved,
             # retarget it live -- no restart, no dropped frames.
             if self._crop_only_change(spec):
-                return self._live_crop(spec, mode_text)
+                self._live_crop(spec, mode_text)
+                return self._live_controls(spec)
 
             # The camera is exclusive: a second open while the old stream
             # holds it cannot even initialise, so this one source stops
@@ -274,14 +345,15 @@ class Supervisor:
         self.stop()
         self.preview_container = preview
         self._camera_ref = crop_ref
-        self.spec = dict(spec, mode=mode_text)
+        self.spec = dict(spec)
         self.last_error = None
         self._stop.clear()
         self._frames = 0
         self._started = time.monotonic()
         self._frames_gen = frames
         self._thread = threading.Thread(
-            target=self._run, args=(frames, mode, source != "camera"),
+            target=self._run,
+            args=(frames, mode, source != "camera", container),
             daemon=True)
         self._thread.start()
         self._persist()
@@ -359,7 +431,11 @@ class Supervisor:
         return spec if isinstance(spec, dict) and spec.get("source") else None
 
     def _crop_only_change(self, spec: dict) -> bool:
-        """True when a camera is streaming and only the window differs."""
+        """True when a camera streams and only LIVE-TUNABLE facts differ.
+
+        The window, the exposure and the gain are runtime facts: they
+        retune the running stream and never touch the world -- a gain
+        slider must have NO PATH to a display-mode negotiation."""
         alive = self._thread is not None and self._thread.is_alive()
         if not (alive and self.spec.get("source") == "camera"
                 and getattr(self, "_camera_ref", None)):
@@ -368,10 +444,9 @@ class Supervisor:
 
         def norm(v):
             return [int(n) for n in v] if v else None
-        return (spec.get("mode", self.default_mode) == old.get("mode")
+        return (spec.get("container") == old.get("container")
+                and spec.get("mode") == old.get("mode")
                 and norm(spec.get("cam_mode")) == norm(old.get("cam_mode"))
-                and spec.get("exposure_us") == old.get("exposure_us")
-                and spec.get("gain") == old.get("gain")
                 and spec.get("flags") == old.get("flags")
                 and bool(spec.get("luma_tunnel"))
                 == bool(old.get("luma_tunnel")))
@@ -403,7 +478,7 @@ class Supervisor:
         encode_packed(np.zeros((h, line_bytes), np.uint8), ref["order"],
                       frame_seq=0, bits=ref["bits"], display=ref["target"])
         ref["crop"] = window
-        self.spec = dict(spec, mode=mode_text)
+        self.spec = dict(spec)
         self.last_error = None
         self._persist()
 
@@ -421,7 +496,8 @@ class Supervisor:
             # (the camera) must be free before the next source opens it.
             generator.close()
 
-    def _run(self, frames, mode, pace: bool = False) -> None:
+    def _run(self, frames, mode, pace: bool = False,
+             container: bool = False) -> None:
         from .kms import DisplayNotReady
 
         def on_frame(index):
@@ -430,7 +506,8 @@ class Supervisor:
                 raise _Stop
         try:
             self._runner(frames, mode=mode, connector=self.connector,
-                         card_path=self.card_path, on_frame=on_frame)
+                         card_path=self.card_path, on_frame=on_frame,
+                         container=container)
         except _Stop:
             pass
         except DisplayNotReady:
