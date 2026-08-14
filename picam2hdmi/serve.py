@@ -232,6 +232,21 @@ class Supervisor:
                 return f"{width}x{lines}@{hz}"
         return None                        # let the explicit paths refuse
 
+    def sensor_modes(self) -> list:
+        """Sizes the STREAMING sensor declares, or an empty list.
+
+        Only the open handle can answer this -- nobody else may open the
+        camera while it streams -- so the daemon publishes what it sees
+        rather than letting a panel keep its own idea of what exists.
+        """
+        return list((self._camera_ref or {}).get("modes") or [])
+
+    def camera_index(self) -> int | None:
+        """Which camera the modes above belong to."""
+        if not self._camera_ref:
+            return None
+        return int((self.spec or {}).get("index", 0))
+
     def _live_controls(self, spec: dict) -> None:
         """Retune the running camera's exposure and gain, live.
 
@@ -612,6 +627,15 @@ def _handler(supervisor: Supervisor):
                                enumerate(Picamera2.global_camera_info())]
                 except Exception:               # noqa: BLE001 -- no camera stack
                     cameras = []
+                # The streaming sensor publishes its own mode list (the
+                # handle is open; nobody else may open it). A panel that
+                # cannot see the real modes cannot mirror the stream,
+                # and a panel that cannot mirror will overwrite.
+                modes = supervisor.sensor_modes()
+                if modes:
+                    for camera in cameras:
+                        if camera["index"] == supervisor.camera_index():
+                            camera["modes"] = [list(m) for m in modes]
                 return self._send(200, {"cameras": cameras})
             if self.path == "/recordings":
                 return self._send(200, {"recordings":

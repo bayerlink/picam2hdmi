@@ -180,6 +180,16 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
 
     if crop_ref is not None:
         crop_ref["picam2"] = picam2   # the live-controls handle
+        # The sensor's OWN mode list, published while it is open: a
+        # panel that has to guess which modes exist can only guess a
+        # stale set, and a stale set is how a click re-applies a mode
+        # nobody asked for.
+        try:
+            crop_ref["modes"] = sorted({
+                (int(m["size"][0]), int(m["size"][1]))
+                for m in picam2.sensor_modes})
+        except Exception:                 # noqa: BLE001 -- kept as absence
+            crop_ref["modes"] = []
     picam2.start()
     print(f"camera: {fmt} {sensor_w}x{sensor_h}, window {w}x{h}+{x}+{y}, "
           f"AE/AWB off"

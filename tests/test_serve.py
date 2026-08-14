@@ -206,6 +206,19 @@ def test_crop_only_change_retargets_the_running_camera(instrument):
     # The world-touching keys still restart: a different sensor mode
     # is a different stream.
     assert not supervisor._crop_only_change(dict(spec, cam_mode=[32, 24]))
+
+    # The sensor's OWN mode list reaches the panel through /cameras.
+    # A panel that cannot see which modes exist keeps a list of its
+    # own, and a stale list is how one click re-applies a mode nobody
+    # asked for -- which is exactly how a 1920x1080 stream once fell
+    # back to 1296x972 mid-bench.
+    assert supervisor.sensor_modes() == []
+    supervisor._camera_ref["modes"] = [(16, 8), (32, 24)]
+    assert supervisor.sensor_modes() == [(16, 8), (32, 24)]
+    code, body = _request(port, "GET", "/cameras")
+    assert code == 200
+    reported = [c for c in body["cameras"] if c.get("modes")]
+    assert reported == [] or reported[0]["modes"] == [[16, 8], [32, 24]]
     supervisor._thread = None             # hand the fake back untouched
 
 

@@ -115,9 +115,13 @@
 <main>
   <div id="left">
   <div class="card" id="pane-camera">
+    <!-- Options are filled from the SENSOR's own mode list (see
+         modeOptions); these are the fallback for a daemon that cannot
+         enumerate, never the authority. -->
     <label>sensor mode <select id="cmode"
       onchange="modeChanged(); applyFromFields()">
       <option value="1296x972">1296x972 (binned)</option>
+      <option value="1920x1080">1920x1080</option>
       <option value="2592x1944">2592x1944 (full, crop to fit)</option>
       <option value="640x480">640x480</option></select></label>
     <label>exposure µs <input id="cexp" type="number" value="30000"
@@ -237,7 +241,12 @@ function renderSources() {
 
 function fetchCameras() {
   api('GET', '/cameras')
-    .then(r => { cameras = r.cameras; renderSources(); })
+    .then(r => {
+      cameras = r.cameras;
+      const live = cameras.find(c => c.modes && c.modes.length);
+      if (live) modeOptions(live.modes, $('cmode').value);
+      renderSources();
+    })
     .catch(() => {});
 }
 
@@ -275,9 +284,33 @@ function modeChanged() {
   drawCrop();
 }
 
+function haveMode(value) {
+  // A mode the list does not contain cannot be mirrored: assigning it
+  // leaves the select on its old entry, and the next click would send
+  // THAT -- silently re-configuring the sensor nobody asked to change.
+  // So the wire's mode always gets an entry.
+  const sel = $('cmode');
+  if ([...sel.options].some(o => o.value === value)) return;
+  sel.add(new Option(value, value));
+}
+
+function modeOptions(list, keep) {
+  // The sensor's own modes, when the daemon can see them. `keep` (the
+  // mode on the wire) survives regardless.
+  const sel = $('cmode');
+  const wanted = list.map(m => m.join('x'));
+  if (keep && !wanted.includes(keep)) wanted.push(keep);
+  if (wanted.join() === [...sel.options].map(o => o.value).join()) return;
+  const was = sel.value;
+  sel.innerHTML = '';
+  for (const value of wanted) sel.add(new Option(value, value));
+  if (wanted.includes(was)) sel.value = was;
+}
+
 function seedCameraFields(src) {
   if (src.cam_mode) {
     const value = src.cam_mode.join('x');
+    haveMode(value);
     if ($('cmode').value !== value) { $('cmode').value = value; modeChanged(); }
   }
   if (src.exposure_us != null) $('cexp').value = src.exposure_us;
