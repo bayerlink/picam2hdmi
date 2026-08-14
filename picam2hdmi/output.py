@@ -62,7 +62,7 @@ def patch_frame_seq(container: np.ndarray, frame_seq: int) -> None:
 
 def stream(frames, mode: tuple[int, int, int] | None = None,
            connector: int | None = None, card_path: str | None = None,
-           on_frame=None) -> None:
+           on_frame=None, container: bool = False) -> None:
     """Scan an iterable of encoded containers out over HDMI. Runs on the Pi.
 
     Args:
@@ -76,14 +76,19 @@ def stream(frames, mode: tuple[int, int, int] | None = None,
     """
     card = kms.Card.open(card_path)
     try:
-        return _stream(card, frames, mode, connector, on_frame)
+        return _stream(card, frames, mode, connector, on_frame, container)
     finally:
         card.close()
 
 
-def _stream(card, frames, mode, connector, on_frame) -> None:
+def _stream(card, frames, mode, connector, on_frame,
+            container: bool = False) -> None:
     connector_id, crtc_id, modes = card.connector(connector)
-    chosen = kms.pick_mode(modes, mode)
+    # A container is OUR mode on OUR raster: the connector's list (its
+    # EDID's opinion) is not consulted. Everything downstream -- buffer
+    # sizing, the modeset ioctl -- takes the ModeInfo at face value.
+    chosen = (kms.container_mode(*mode) if container
+              else kms.pick_mode(modes, mode))
     forced = card.force_full_range(connector_id)
     pixel_format, buffers = card.framebuffers(chosen, count=2)
 

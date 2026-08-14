@@ -174,6 +174,56 @@ FORMAT_RG24 = fourcc("RG24")
 FORMAT_XR24 = fourcc("XR24")
 
 
+# Proven scanout rasters: the pixel clock and sync positions of the two
+# CEA modes every budget in PROTOCOL.md was brought up on. A CONTAINER
+# mode keeps a raster VERBATIM and claims a different active window
+# inside it -- the private-link case, where both ends are ours, the
+# receiver counts DE rather than reading mode names, and EDID has no
+# vote. The active window must end before the sync it borrows.
+#   (clock kHz, hs_start, hs_end, htotal, vs_start, vs_end, vtotal, hz)
+_RASTERS = (
+    (74250, 1390, 1430, 1650, 725, 730, 750, 60),      # the 720p60 raster
+    (74250, 2008, 2052, 2200, 1084, 1089, 1125, 30),   # the 1080p30 raster
+)
+_FLAG_PHSYNC = 0x1
+_FLAG_PVSYNC = 0x4
+
+
+def container_fits(width: int, height: int, hz: int) -> bool:
+    """Whether some proven raster holds this window at this refresh."""
+    return any(rhz == hz and width < hss and height < vss
+               for _, hss, _, _, vss, _, _, rhz in _RASTERS)
+
+
+def container_mode(width: int, height: int, hz: int = 60) -> ModeInfo:
+    """A ModeInfo for a bayerlink container: our raster, our window.
+
+    Refuses geometry the borrowed raster cannot hold: the window must
+    end before the raster's sync starts, horizontally and vertically.
+    Pure function, tested off-target, like pick_mode and for the same
+    reason."""
+    for clock, hss, hse, htot, vss, vse, vtot, rhz in _RASTERS:
+        if rhz != hz or width >= hss or height >= vss:
+            continue
+        mode = ModeInfo()
+        mode.clock = clock
+        mode.hdisplay, mode.hsync_start = width, hss
+        mode.hsync_end, mode.htotal = hse, htot
+        mode.vdisplay, mode.vsync_start = height, vss
+        mode.vsync_end, mode.vtotal = vse, vtot
+        mode.vrefresh = rhz
+        mode.flags = _FLAG_PHSYNC | _FLAG_PVSYNC
+        mode.type = 0
+        mode.name = f"{width}x{height}@{hz}c".encode()[:31]
+        return mode
+    limits = [f"{hss - 1}x{vss - 1}@{rhz}"
+              for _, hss, _, _, vss, _, _, rhz in _RASTERS]
+    raise RuntimeError(
+        f"no raster holds a {width}x{height}@{hz} container; the windows "
+        f"must fit {limits}. A container borrows a proven raster's clock "
+        "and syncs; it does not invent timings.")
+
+
 def pick_mode(modes, want=None):
     """Choose the display mode: exact request, else the connector's preferred.
 

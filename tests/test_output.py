@@ -148,3 +148,27 @@ def test_file_frames_refuses_mismatched_geometry(tmp_path):
     np.save(path, frame)
     with pytest.raises(ValueError, match="display is 64"):
         next(file_frames(str(path), (64, 12)))
+
+
+def test_container_mode_borrows_a_proven_raster():
+    from picam2hdmi import kms
+
+    m = kms.container_mode(1280, 722, 60)
+    assert (m.hdisplay, m.vdisplay) == (1280, 722)
+    assert (m.clock, m.htotal, m.vtotal) == (74250, 1650, 750)
+    assert (m.hsync_start, m.hsync_end) == (1390, 1430)
+    assert (m.vsync_start, m.vsync_end) == (725, 730)
+    assert m.vrefresh == 60
+
+    # the full binned sensor plus its header line rides the 1080p raster
+    tall = kms.container_mode(1296, 974, 30)
+    assert (tall.htotal, tall.vtotal, tall.clock) == (2200, 1125, 74250)
+
+    # the window may not touch the sync it borrows, either axis
+    with pytest.raises(RuntimeError):
+        kms.container_mode(1280, 725, 60)
+    with pytest.raises(RuntimeError):
+        kms.container_mode(1390, 100, 60)
+    # and a raster that does not exist is not invented
+    with pytest.raises(RuntimeError):
+        kms.container_mode(1280, 722, 50)
