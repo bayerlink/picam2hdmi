@@ -337,7 +337,8 @@ class Supervisor:
                 crop=tuple(int(v) for v in crop) if crop else None,
                 exposure_us=spec.get("exposure_us"),
                 analogue_gain=spec.get("gain"),
-                luma_tunnel=tunnel, peek=_stash, crop_ref=crop_ref)
+                luma_tunnel=tunnel, peek=_stash, crop_ref=crop_ref,
+                source_id=spec.get("source_id"))
             first = next(frames)          # frame 0 peeked during this pull
             preview = self.preview_container
             frames = _chain(first, frames)

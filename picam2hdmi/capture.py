@@ -107,7 +107,7 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
            exposure_us: int | None = None,
            analogue_gain: float | None = None,
            luma_tunnel: bool = False, flags: int = 0, peek=None,
-           crop_ref=None):
+           crop_ref=None, source_id: int | None = None):
     """An endless container source from the camera. Runs on the Pi.
 
     Yields scanout-shaped frames exactly like the pattern and file
@@ -119,6 +119,14 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     any tunnel wrap -- the content, so a control surface can show what
     the crop is selecting even when the wire carries the tunnel's grey.
     It never touches the wire path.
+
+    ``source_id`` stamps the header's camera field. Left None it is
+    derived from the sensor's own model, through bayerlink's table --
+    so a receiver can tell an OV5647 from an IMX477 and load the
+    calibration that belongs to it, which is the one thing a hot swap
+    needs that the pixels cannot supply. Pass a value explicitly where
+    two cameras of the SAME model run at once: the field is what tells
+    their streams apart, and a model-derived one cannot.
 
     ``crop_ref``, if given, is a mutable mapping. On startup this
     source fills it with the facts a controller needs to validate a
@@ -136,7 +144,7 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
             "camera capture needs Picamera2 (sudo apt install "
             f"python3-picamera2), which is Pi-only: {error}") from None
 
-    from bayerlink import encode_packed
+    from bayerlink import encode_packed, source_id_for
     from bayerlink import tunnel as _tunnel
     from bayerlink.protocol import _GROUP
 
@@ -161,6 +169,8 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     lo, hi, _ = picam2.camera_controls["FrameDurationLimits"]
     config["controls"]["FrameDurationLimits"] = (int(lo), int(hi))
     picam2.configure(config)
+    model = picam2.camera_properties.get("Model")
+    sid = source_id_for(model) if source_id is None else int(source_id)
     raw_config = picam2.camera_configuration()["raw"]
     fmt = raw_config["format"]
     order, bits = order_from_format(fmt)
@@ -191,8 +201,9 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
         except Exception:                 # noqa: BLE001 -- kept as absence
             crop_ref["modes"] = []
     picam2.start()
-    print(f"camera: {fmt} {sensor_w}x{sensor_h}, window {w}x{h}+{x}+{y}, "
-          f"AE/AWB off"
+    print(f"camera: {model or 'unknown'} (source_id {sid}"
+          + ("" if sid else ", UNKNOWN to bayerlink's table") + "), "
+          f"{fmt} {sensor_w}x{sensor_h}, window {w}x{h}+{x}+{y}, AE/AWB off"
           + (f", exposure {exposure_us}us" if exposure_us else "")
           + (f", gain {analogue_gain}" if analogue_gain else ""))
 
@@ -213,7 +224,8 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
                 else rows
             container = encode_packed(np.ascontiguousarray(window), order,
                                       frame_seq=sequence, bits=bits,
-                                      display=target, flags=flags)
+                                      display=target, flags=flags,
+                                      source_id=sid)
             # Every frame: the stash is a reference store, so the live
             # view's rate is decided by whoever READS it, not here.
             if peek is not None:

@@ -91,6 +91,13 @@ def main(argv=None) -> int:
                         help="start idle instead of restoring the last "
                              "source (or streaming the default pattern)")
 
+    parser.add_argument("--source-id", type=int, default=None,
+                        help="header camera field (0-255). Default: derived "
+                             "from the sensor's model, so a receiver can "
+                             "load the calibration that belongs to it. Set "
+                             "it where two cameras of the SAME model run at "
+                             "once -- the field is what tells their streams "
+                             "apart, and a model-derived one cannot")
     args = parser.parse_args(argv)
 
     if args.command == "pattern":
@@ -156,7 +163,8 @@ def main(argv=None) -> int:
             frames = capture.frames(display, mode=cam_mode, crop=crop,
                                     exposure_us=args.exposure_us,
                                     analogue_gain=args.gain,
-                                    luma_tunnel=args.luma_tunnel)
+                                    luma_tunnel=args.luma_tunnel,
+                                    source_id=args.source_id)
         elif args.source == "file":
             if not args.file:
                 parser.error("--source file needs --file <recording.npy>")
