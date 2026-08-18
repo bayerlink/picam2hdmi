@@ -139,8 +139,42 @@ class SetConnectorProperty(ctypes.Structure):
                 ("connector_id", u32)]                      # 16 bytes
 
 
+class SetClientCap(ctypes.Structure):
+    _fields_ = [("capability", u64), ("value", u64)]        # 16 bytes
+
+
+class GetPlaneRes(ctypes.Structure):
+    _fields_ = [("plane_id_ptr", u64), ("count_planes", u32)]   # 16 padded
+
+
+class GetPlane(ctypes.Structure):
+    _fields_ = [("plane_id", u32), ("crtc_id", u32), ("fb_id", u32),
+                ("possible_crtcs", u32), ("gamma_size", u32),
+                ("count_format_types", u32),
+                ("format_type_ptr", u64)]                   # 32 bytes
+
+
+class SetPlane(ctypes.Structure):
+    # src_h BEFORE src_w, faithfully to the UAPI: the one field order
+    # in DRM that everyone gets wrong once. Src coords are 16.16 fixed.
+    _fields_ = [("plane_id", u32), ("crtc_id", u32), ("fb_id", u32),
+                ("flags", u32), ("crtc_x", ctypes.c_int32),
+                ("crtc_y", ctypes.c_int32), ("crtc_w", u32),
+                ("crtc_h", u32), ("src_x", u32), ("src_y", u32),
+                ("src_h", u32), ("src_w", u32)]             # 48 bytes
+
+
+class PrimeHandle(ctypes.Structure):
+    _fields_ = [("handle", u32), ("flags", u32),
+                ("fd", ctypes.c_int32)]                     # 12 bytes
+
+
 def _iowr(nr: int, struct) -> int:
     return (3 << 30) | (ctypes.sizeof(struct) << 16) | (ord("d") << 8) | nr
+
+
+def _iow(nr: int, struct) -> int:
+    return (1 << 30) | (ctypes.sizeof(struct) << 16) | (ord("d") << 8) | nr
 
 
 IOCTL_GETRESOURCES = _iowr(0xA0, CardRes)
@@ -153,6 +187,13 @@ IOCTL_PAGE_FLIP = _iowr(0xB0, PageFlip)
 IOCTL_CREATE_DUMB = _iowr(0xB2, CreateDumb)
 IOCTL_MAP_DUMB = _iowr(0xB3, MapDumb)
 IOCTL_ADDFB2 = _iowr(0xB8, FbCmd2)
+IOCTL_SET_CLIENT_CAP = _iow(0x0D, SetClientCap)
+IOCTL_GETPLANERESOURCES = _iowr(0xB5, GetPlaneRes)
+IOCTL_GETPLANE = _iowr(0xB6, GetPlane)
+IOCTL_SETPLANE = _iowr(0xB7, SetPlane)
+IOCTL_PRIME_HANDLE_TO_FD = _iowr(0x2D, PrimeHandle)
+
+CLIENT_CAP_UNIVERSAL_PLANES = 2
 
 CONNECTOR_HDMIA = 11
 CONNECTED = 1
@@ -435,6 +476,49 @@ class Card:
                     count_connectors=1, crtc_id=crtc_id,
                     fb_id=framebuffer.fb_id, mode_valid=1, mode=mode)
         self._ioctl(IOCTL_SETCRTC, crtc)
+
+    def prime_fd(self, handle: int) -> int:
+        """Export a dumb buffer as a DMABUF fd.
+
+        This is the zero-copy hinge of the line-latency bridge: the
+        same bytes are Unicam's DMA target and the HVS's scanout
+        source, so nothing per-pixel ever crosses the CPU. The fd is
+        the caller's to close."""
+        arg = PrimeHandle(handle=handle, flags=os.O_CLOEXEC | os.O_RDWR)
+        self._ioctl(IOCTL_PRIME_HANDLE_TO_FD, arg)
+        return arg.fd
+
+    def enable_universal_planes(self) -> None:
+        """Ask DRM to show every plane, not the legacy pair.
+
+        The HVS composites many planes per CRTC; the bridge uses one
+        for the CPU-written header row and one for the DMA-written
+        payload, which is what spares the payload plane any notion of
+        an offset -- V4L2's DMABUF import always starts at byte 0."""
+        self._ioctl(IOCTL_SET_CLIENT_CAP,
+                    SetClientCap(capability=CLIENT_CAP_UNIVERSAL_PLANES,
+                                 value=1))
+
+    def planes(self) -> list:
+        res = GetPlaneRes()
+        self._ioctl(IOCTL_GETPLANERESOURCES, res)
+        ids = (u32 * res.count_planes)()
+        res.plane_id_ptr = ctypes.addressof(ids)
+        self._ioctl(IOCTL_GETPLANERESOURCES, res)
+        out = []
+        for plane_id in ids:
+            info = GetPlane(plane_id=plane_id)
+            self._ioctl(IOCTL_GETPLANE, info)
+            out.append((plane_id, info.possible_crtcs, info.fb_id))
+        return out
+
+    def set_plane(self, plane_id: int, crtc_id: int, fb_id: int,
+                  crtc_x: int, crtc_y: int, width: int, height: int) -> None:
+        """Place a framebuffer on a plane, unscaled. Src is 16.16."""
+        self._ioctl(IOCTL_SETPLANE, SetPlane(
+            plane_id=plane_id, crtc_id=crtc_id, fb_id=fb_id, flags=0,
+            crtc_x=crtc_x, crtc_y=crtc_y, crtc_w=width, crtc_h=height,
+            src_x=0, src_y=0, src_h=height << 16, src_w=width << 16))
 
     def flip(self, crtc_id: int, framebuffer: Framebuffer) -> None:
         self._ioctl(IOCTL_PAGE_FLIP, PageFlip(
