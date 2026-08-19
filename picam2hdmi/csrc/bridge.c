@@ -1,0 +1,671 @@
+/* Copyright 2026 Serge Rabyking
+ * SPDX-License-Identifier: MIT
+ *
+ * The Pi as a thin bridge: sensor lines land on the wire in LINES.
+ *
+ * Unicam DMAs each sensor line straight into the KMS scanout buffer
+ * (stride = display pitch), the HVS scans the same bytes out behind
+ * the write beam, and the CPU's whole job per frame is 48 bytes of
+ * bayerlink header and one control write. No libcamera: the kernel's
+ * sensor driver owns the init, and the FPGA on the far end is the ISP.
+ *
+ * This is the shipping twin of picam2hdmi/bridge.py, which remains the
+ * reference implementation -- same architecture, proven first (colour
+ * bars through the whole chain, 2026-08-19). C because the kernel ABI
+ * structs come from the kernel's own headers instead of hand-built
+ * copies, because a single static-ish binary is the appliance shape,
+ * and because SCHED_FIFO + mlockall bound the tails Python only makes
+ * unlikely. `make check` holds the two implementations byte-identical
+ * where they must agree: the header.
+ *
+ * WHAT THIS ADDS over the Python twin: the genlock loop. The sensor
+ * and the display run on crystals that owe each other nothing;
+ * unsteered, the write beam laps the read beam and a tear seam
+ * drifts through the picture. The loop is a plain PLL -- hblank sets
+ * the rate once, vblank trims the phase continuously -- and the
+ * setpoint, the write beam's lead over the read beam, IS the Pi's
+ * whole contribution to end-to-end latency.
+ */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <math.h>
+#include <poll.h>
+#include <sched.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <drm/drm_mode.h>
+#include <drm/drm_fourcc.h>
+
+#include <linux/media-bus-format.h>
+#include "bridge.h"
+#include <linux/v4l2-subdev.h>
+#include <linux/videodev2.h>
+
+#define WIDTH  1920
+#define HEIGHT 1080
+#define VDISP  (HEIGHT + 1)            /* + the header row            */
+#define BL_MAGIC  0x4B4C5942u          /* "BYLK"                      */
+
+/* The header's fourcc DECLARES the mosaic order. For ov5647 1080p
+ * the driver's GBRG is CORRECT -- confirmed the expensive way,
+ * 2026-08-19, by walking the claim through all four orders against
+ * REAL LIGHT: BGGR mixed (one axis off), GRBG swapped red and blue
+ * (diagonal), GBRG rendered true. The morning had "proven" BGGR
+ * from the sensor's colour-bar pattern, and that proof was the
+ * mistake worth recording: the TEST PATTERN is digital, injected at
+ * the readout with the GENERATOR'S own parity, one column off the
+ * physical array's crop parity here. Bars validate transport and
+ * demosaic; they are NO ORACLE for the mosaic phase of real light.
+ * The only parity witness is a real scene through the real filters.
+ * (Transport row-exactness was proven separately, 2026-08-12.) */
+static const struct { const char *name; uint32_t fourcc; } ORDERS[] = {
+    {"GBRG", 0x41414770u},             /* 'pGAA' */
+    {"RGGB", 0x41415270u},             /* 'pRAA' */
+    {"BGGR", 0x41414270u},             /* 'pBAA' */
+    {"GRBG", 0x41416770u},             /* 'pgAA' */
+};
+static uint32_t bl_fourcc = 0x41414770u;    /* GBRG: the driver was
+                                             * right; see above */
+#define SOURCE_ID_OV5647 1
+
+/* The 1080p30 raster, from kms.py's _RASTERS -- one owner, restated
+ * here because C cannot import it; `make check` cannot hold a modeline,
+ * so a comment holds the pointer instead. */
+static drmModeModeInfo MODE = {
+    .clock = 74250,
+    .hdisplay = WIDTH,  .hsync_start = 2008, .hsync_end = 2052,
+    .htotal = 2200,
+    .vdisplay = VDISP,  .vsync_start = 1084, .vsync_end = 1089,
+    .vtotal = 1125,
+    .vrefresh = 30,
+    .flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC,
+    .type = DRM_MODE_TYPE_USERDEF,
+    .name = "bayerlink1081",
+};
+
+static volatile sig_atomic_t running = 1;
+static void on_sig(int sig) { (void)sig; running = 0; }
+
+static void die(const char *what) { perror(what); exit(1); }
+
+/* The default hook does nothing; a module in modules/ overrides it
+ * (weak symbol) and is compiled in by the on-device rebuild. */
+__attribute__((weak)) void bridge_frame_hook(const struct bridge_frame *f) {
+    (void)f;
+}
+
+/* ---------------------------------------------------------------- */
+/* bayerlink v2 header: 44 bytes + CRC32. Layout owned by            */
+/* bayerlink/protocol.py (_HEADER_FMT "<IHHIIIIIBBBBIII"); this copy */
+/* is held byte-identical to it by `make check`, not by care.        */
+/* ---------------------------------------------------------------- */
+
+struct __attribute__((packed)) bl_header {
+    uint32_t magic, /*u16*/ version_hb;   /* version u16 + header_bytes u16 */
+    uint32_t fourcc, width, height, frame_seq, flags;
+    uint8_t  source_id, stripe_index, stripe_count, pad0;
+    uint32_t stripe_offset, full_height, pad1, crc;
+};
+
+static uint32_t crc_table[256];
+static void crc_init(void) {
+    for (uint32_t n = 0; n < 256; n++) {
+        uint32_t c = n;
+        for (int k = 0; k < 8; k++)
+            c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+        crc_table[n] = c;
+    }
+}
+static uint32_t crc32z(const uint8_t *p, size_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    while (n--) c = crc_table[(c ^ *p++) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+
+static void pack_header(uint8_t out[48], uint32_t seq, uint8_t source_id) {
+    struct bl_header h = {
+        .magic = BL_MAGIC,
+        .version_hb = 2u | (48u << 16),
+        .fourcc = bl_fourcc, .width = WIDTH, .height = HEIGHT,
+        .frame_seq = seq, .flags = 0,
+        .source_id = source_id, .stripe_index = 0, .stripe_count = 1,
+        .pad0 = 0, .stripe_offset = 0, .full_height = HEIGHT, .pad1 = 0,
+    };
+    memcpy(out, &h, 44);
+    uint32_t crc = crc32z(out, 44);
+    memcpy(out + 44, &crc, 4);
+}
+
+/* ---------------------------------------------------------------- */
+/* DRM: mode, two planes, PRIME                                      */
+/* ---------------------------------------------------------------- */
+
+struct dumb { uint32_t handle, pitch, fb_id; uint64_t size; uint8_t *map; };
+
+static struct dumb make_fb(int fd, uint32_t w, uint32_t h) {
+    struct dumb d = {0};
+    struct drm_mode_create_dumb c = {.width = w, .height = h, .bpp = 24};
+    if (drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &c)) die("CREATE_DUMB");
+    d.handle = c.handle; d.pitch = c.pitch; d.size = c.size;
+    uint32_t handles[4] = {c.handle}, pitches[4] = {c.pitch}, offs[4] = {0};
+    if (drmModeAddFB2(fd, w, h, DRM_FORMAT_RGB888, handles, pitches, offs,
+                      &d.fb_id, 0))
+        die("ADDFB2 (RGB888)");
+    struct drm_mode_map_dumb m = {.handle = c.handle};
+    if (drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &m)) die("MAP_DUMB");
+    d.map = mmap(NULL, c.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+                 m.offset);
+    if (d.map == MAP_FAILED) die("mmap dumb");
+    memset(d.map, 0, c.size);           /* the protocol's zero padding */
+    return d;
+}
+
+static uint32_t overlay_plane(int fd, int crtc_index) {
+    drmModePlaneResPtr planes = drmModeGetPlaneResources(fd);
+    if (!planes) die("GetPlaneResources");
+    uint32_t found = 0;
+    for (uint32_t i = 0; i < planes->count_planes && !found; i++) {
+        drmModePlanePtr p = drmModeGetPlane(fd, planes->planes[i]);
+        if (!p) continue;
+        if ((p->possible_crtcs & (1u << crtc_index)) && p->fb_id == 0) {
+            /* overlay only: a cursor plane would take the SETPLANE and
+             * refuse the size twenty minutes later, in the compositor */
+            drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(
+                fd, p->plane_id, DRM_MODE_OBJECT_PLANE);
+            for (uint32_t j = 0; props && j < props->count_props; j++) {
+                drmModePropertyPtr pr = drmModeGetProperty(fd, props->props[j]);
+                if (pr && !strcmp(pr->name, "type")
+                    && props->prop_values[j] == DRM_PLANE_TYPE_OVERLAY)
+                    found = p->plane_id;
+                drmModeFreeProperty(pr);
+            }
+            drmModeFreeObjectProperties(props);
+        }
+        drmModeFreePlane(p);
+    }
+    drmModeFreePlaneResources(planes);
+    if (!found) { fprintf(stderr, "no overlay plane free\n"); exit(1); }
+    return found;
+}
+
+static void force_full_range(int fd, uint32_t connector_id) {
+    /* A limited-range link clamps to 16..235 -- precisely where raw
+     * data lives. Same policy, same reason as kms.py. */
+    drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(
+        fd, connector_id, DRM_MODE_OBJECT_CONNECTOR);
+    for (uint32_t i = 0; props && i < props->count_props; i++) {
+        drmModePropertyPtr pr = drmModeGetProperty(fd, props->props[i]);
+        if (pr && !strcmp(pr->name, "Broadcast RGB")) {
+            for (int e = 0; e < pr->count_enums; e++)
+                if (!strcmp(pr->enums[e].name, "Full"))
+                    drmModeObjectSetProperty(fd, connector_id,
+                        DRM_MODE_OBJECT_CONNECTOR, pr->prop_id,
+                        pr->enums[e].value);
+        }
+        drmModeFreeProperty(pr);
+    }
+    drmModeFreeObjectProperties(props);
+}
+
+/* ---------------------------------------------------------------- */
+/* V4L2: the kernel driver owns the sensor, we own eight ioctls      */
+/* ---------------------------------------------------------------- */
+
+static void set_ctrl(int fd, uint32_t id, int32_t value, const char *name) {
+    struct v4l2_control c = {.id = id, .value = value};
+    if (ioctl(fd, VIDIOC_S_CTRL, &c) < 0) {
+        fprintf(stderr, "S_CTRL %s=%d: %s\n", name, value, strerror(errno));
+        exit(1);
+    }
+}
+
+static int64_t get_pixel_rate(int fd) {
+    struct v4l2_ext_control c = {.id = V4L2_CID_PIXEL_RATE};
+    struct v4l2_ext_controls cs = {
+        .which = V4L2_CTRL_WHICH_CUR_VAL, .count = 1, .controls = &c};
+    if (ioctl(fd, VIDIOC_G_EXT_CTRLS, &cs) < 0) die("PIXEL_RATE");
+    return c.value64;
+}
+
+/* ---------------------------------------------------------------- */
+
+static double ts_sec(struct timeval tv) {
+    return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
+}
+
+/* Bring a kernel timestamp into the MONOTONIC frame, whatever clock
+ * stamped it. The event in question just happened, so whichever clock
+ * puts it in the recent past is the clock that stamped it. Assuming
+ * instead of identifying cost two forty-second runs: first the vblank
+ * side, then the capture side, each time NTP slew wearing the costume
+ * of crystal drift while the actuator shouted forty lines a frame into
+ * a meter that could not see it. */
+static double to_mono(double ts, int *bad) {
+    struct timespec m, r;
+    clock_gettime(CLOCK_MONOTONIC, &m);
+    clock_gettime(CLOCK_REALTIME, &r);
+    double nm = m.tv_sec + m.tv_nsec * 1e-9;
+    double nr = r.tv_sec + r.tv_nsec * 1e-9;
+    double age_m = nm - ts, age_r = nr - ts;
+    if (age_m >= 0 && age_m < 0.5) return ts;
+    if (age_r >= 0 && age_r < 0.5) return nm - age_r;
+    if (bad) *bad = 1;
+    return ts;
+}
+
+int main(int argc, char **argv) {
+    int exposure = 1000, gain = 200, seconds = 0, margin_lines = 10;
+    int test_pattern = 0, selftest = 0;
+    const char *video = "/dev/video2", *subdev = "/dev/v4l-subdev0";
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--selftest")) selftest = 1;
+        else if (!strcmp(argv[i], "--exposure")) exposure = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--gain")) gain = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--seconds")) seconds = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--margin")) margin_lines = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--test-pattern")) test_pattern = 1;
+        else if (!strcmp(argv[i], "--order")) {
+            const char *o = argv[++i]; size_t k;
+            for (k = 0; k < 4 && strcmp(o, ORDERS[k].name); k++) ;
+            if (k == 4) { fprintf(stderr, "unknown order %s\n", o); return 2; }
+            bl_fourcc = ORDERS[k].fourcc;
+        }
+        else if (!strcmp(argv[i], "--video")) video = argv[++i];
+        else if (!strcmp(argv[i], "--subdev")) subdev = argv[++i];
+        else { fprintf(stderr, "unknown arg %s\n", argv[i]); return 2; }
+    }
+    crc_init();
+    setvbuf(stdout, NULL, _IOLBF, 0);   /* notes must land, not pool */
+
+    if (selftest) {
+        /* `make check` compares these bytes with the Python reference:
+         * the header layout has ONE owner and this copy is verified
+         * against it, never trusted. */
+        uint8_t h[48];
+        uint32_t seqs[3] = {7, 0, 123456};
+        for (int i = 0; i < 3; i++) {
+            pack_header(h, seqs[i], SOURCE_ID_OV5647);
+            for (int b = 0; b < 48; b++) printf("%02x", h[b]);
+            printf("\n");
+        }
+        return 0;
+    }
+
+    signal(SIGINT, on_sig); signal(SIGTERM, on_sig);
+    /* Bound the tails: this is why the shipping twin is C. Refusal to
+     * grant either is a warning, not an exit -- a dev box still works. */
+    struct sched_param sp = {.sched_priority = 10};
+    if (sched_setscheduler(0, SCHED_FIFO, &sp))
+        fprintf(stderr, "note: no SCHED_FIFO (%s)\n", strerror(errno));
+    if (mlockall(MCL_CURRENT | MCL_FUTURE))
+        fprintf(stderr, "note: no mlockall (%s)\n", strerror(errno));
+
+    /* --- display ------------------------------------------------- */
+    int dfd = open("/dev/dri/card1", O_RDWR);
+    if (dfd < 0) dfd = open("/dev/dri/card0", O_RDWR);
+    if (dfd < 0) die("open dri");
+    drmSetClientCap(dfd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+
+    drmModeResPtr res = drmModeGetResources(dfd);
+    if (!res) die("GetResources");
+    uint32_t connector_id = 0, crtc_id = 0;
+    int crtc_index = 0;
+    for (int i = 0; i < res->count_connectors && !connector_id; i++) {
+        drmModeConnectorPtr c = drmModeGetConnector(dfd, res->connectors[i]);
+        if (c && c->connection == DRM_MODE_CONNECTED) {
+            connector_id = c->connector_id;
+            drmModeEncoderPtr e = c->encoder_id
+                ? drmModeGetEncoder(dfd, c->encoder_id) : NULL;
+            uint32_t possible = e ? e->possible_crtcs : 0xFF;
+            if (e && e->crtc_id) crtc_id = e->crtc_id;
+            drmModeFreeEncoder(e);
+            for (int k = 0; k < res->count_crtcs; k++)
+                if (crtc_id ? res->crtcs[k] == crtc_id
+                            : (possible & (1u << k))) {
+                    crtc_id = res->crtcs[k]; crtc_index = k; break;
+                }
+        }
+        drmModeFreeConnector(c);
+    }
+    if (!connector_id || !crtc_id) {
+        fprintf(stderr, "no connected connector/CRTC\n"); return 1;
+    }
+    force_full_range(dfd, connector_id);
+
+    struct dumb base = make_fb(dfd, WIDTH, VDISP);
+    struct dumb pay = make_fb(dfd, WIDTH, HEIGHT);
+    if (drmModeSetCrtc(dfd, crtc_id, base.fb_id, 0, 0, &connector_id, 1,
+                       &MODE))
+        die("SetCrtc");
+    uint32_t plane = overlay_plane(dfd, crtc_index);
+    if (drmModeSetPlane(dfd, plane, crtc_id, pay.fb_id, 0,
+                        0, 1, WIDTH, HEIGHT,
+                        0, 0, WIDTH << 16, HEIGHT << 16))
+        die("SetPlane");
+    int dmabuf = -1;
+    if (drmPrimeHandleToFD(dfd, pay.handle, DRM_CLOEXEC | DRM_RDWR, &dmabuf))
+        die("PrimeHandleToFD");
+
+    /* --- camera --------------------------------------------------- */
+    int sfd = open(subdev, O_RDWR);
+    if (sfd < 0) die("open subdev");
+    struct v4l2_subdev_format sf = {
+        .which = V4L2_SUBDEV_FORMAT_ACTIVE, .pad = 0,
+        .format = {.width = WIDTH, .height = HEIGHT,
+                   .code = MEDIA_BUS_FMT_SGBRG10_1X10,
+                   .field = V4L2_FIELD_NONE}};
+    if (ioctl(sfd, VIDIOC_SUBDEV_S_FMT, &sf) < 0) die("SUBDEV_S_FMT");
+
+    set_ctrl(sfd, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL, "ae");
+    set_ctrl(sfd, V4L2_CID_AUTOGAIN, 0, "agc");
+    set_ctrl(sfd, V4L2_CID_AUTO_WHITE_BALANCE, 0, "awb");
+    set_ctrl(sfd, V4L2_CID_ANALOGUE_GAIN, gain, "gain");
+    set_ctrl(sfd, V4L2_CID_TEST_PATTERN, test_pattern, "pattern");
+
+    /* LINE LOCK, not just frame lock. The sensor's HTS is writable
+     * and OBEYS -- verified 2026-08-19, fps following hblank to
+     * three digits in two modes. So make the sensor's line time
+     * EQUAL the display's, and its VTS equal the display's vtotal:
+     * the two rasters then run stride for stride and the write
+     * beam's lead is CONSTANT down the frame (with unequal line
+     * times it grows ~75 lines top to bottom, and the margin must
+     * be budgeted at the tightest point). All derived from the
+     * sensor's own pixel rate and the mode table, not tabulated. */
+    double pixel_rate = (double)get_pixel_rate(sfd);
+    double t_frame_d = (double)MODE.htotal * MODE.vtotal / (MODE.clock * 1e3);
+    double t_row_d = t_frame_d / MODE.vtotal;
+    int hblank_nom = (int)(t_row_d * pixel_rate + 0.5) - WIDTH;
+    int vblank_fix = MODE.vtotal - HEIGHT;
+    double t_row_s = (WIDTH + hblank_nom) / pixel_rate;
+    if (exposure > HEIGHT + vblank_fix - 8) {
+        /* an exposure beyond VTS silently stretches the frame -- the
+         * 16fps surprise of 2026-08-18, refused here by arithmetic */
+        exposure = HEIGHT + vblank_fix - 8;
+        fprintf(stderr, "exposure clamped to %d (VTS bound)\n", exposure);
+    }
+    set_ctrl(sfd, V4L2_CID_EXPOSURE, exposure, "exposure");
+    set_ctrl(sfd, V4L2_CID_VBLANK, vblank_fix, "vblank");
+    set_ctrl(sfd, V4L2_CID_HBLANK, hblank_nom, "hblank");
+
+    int vfd = open(video, O_RDWR | O_NONBLOCK);
+    if (vfd < 0) die("open video");
+    struct v4l2_format fmt = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
+    fmt.fmt.pix.width = WIDTH; fmt.fmt.pix.height = HEIGHT;
+    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_SGBRG10P;
+    fmt.fmt.pix.field = V4L2_FIELD_NONE;
+    fmt.fmt.pix.bytesperline = pay.pitch;
+    if (ioctl(vfd, VIDIOC_S_FMT, &fmt) < 0) die("S_FMT");
+    if (fmt.fmt.pix.bytesperline != pay.pitch) {
+        fprintf(stderr, "unicam kept bytesperline %u, need %u: the stride "
+                "IS the bridge, refusing\n",
+                fmt.fmt.pix.bytesperline, pay.pitch);
+        return 1;
+    }
+
+    /* TWO buffer slots, ONE buffer: unicam pipelines -- it wants the
+     * next slot queued before the current frame ends, and a single
+     * slot loses every other frame (592 of 1200, measured). Both
+     * slots import the same dmabuf, so every frame still lands in
+     * the one beam-racing BO. */
+    struct v4l2_requestbuffers req = {
+        .count = 2, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+        .memory = V4L2_MEMORY_DMABUF};
+    if (ioctl(vfd, VIDIOC_REQBUFS, &req) < 0) die("REQBUFS");
+
+    for (uint32_t i = 0; i < 2; i++) {
+        struct v4l2_buffer buf = {
+            .index = i, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+            .memory = V4L2_MEMORY_DMABUF, .length = (uint32_t)pay.size};
+        buf.m.fd = dmabuf;
+        if (ioctl(vfd, VIDIOC_QBUF, &buf) < 0) die("QBUF");
+    }
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(vfd, VIDIOC_STREAMON, &type) < 0) die("STREAMON");
+
+    printf("bridge: %dx%d pGAA, pitch %u, LINE-LOCKED hblank %d "
+           "vblank %d, row %.3fus(s)/%.3fus(d), margin %d lines\n",
+           WIDTH, HEIGHT, pay.pitch, hblank_nom, vblank_fix,
+           t_row_s * 1e6, t_row_d * 1e6, margin_lines);
+
+    /* --- the loop: DQBUF, header, genlock, QBUF -------------------- */
+    /* WHERE the margin lives: the writer's line time is shorter than
+     * the reader's, so its lead GROWS down the frame -- the minimum is
+     * at the TOP. A margin at the frame END would let the reader start
+     * ahead and be overtaken mid-frame: a locked loop then pins a
+     * stationary tear seam around row 750. So the setpoint is on the
+     * frame START: writer begins `margin` display lines before the
+     * reader's vblank, phrased through the frame-END time because
+     * that is the event we can stamp. Top-of-frame latency is then
+     * margin+2 display lines -- under a millisecond. */
+    /* The margin is ADAPTIVE -- derived continuously from the
+     * loop's own telemetry instead of measured once and tabulated.
+     * An asymmetric ratchet on three timescales: EXPAND within a
+     * frame when the filtered beam comes within 4 lines of eating
+     * the margin (a close call is acted on before it can repeat);
+     * SHRINK a line a minute, only while the margin carries 4+
+     * lines over the worst excursion of the last half hour; and
+     * every setpoint move slews at 1 line/frame -- inside the
+     * winsorizer's +/-3 band, so the filter state needs no surgery
+     * and the vblank knob carries it as ordinary trims. Floor 4
+     * (structural 2 + 2), ceiling 24. On a quiet Pi 5 this settles
+     * near the floor; on a loaded Zero it rides higher; nobody
+     * re-runs a bench procedure. */
+    double margin = margin_lines, margin_goal = margin;
+    double target = HEIGHT * t_row_s - margin * t_row_d;
+    double bucket_max[6] = {0}; int bucket_i = 0, m_cool = 0;
+    double integ = 0, lines_f = 0; int vblank_cmd = vblank_fix, locked = 0;
+    /* The margin question, answered by measurement instead of by
+     * choosing: record the RAW phase excursion once locked -- the
+     * unfiltered tail is what eats margin, the EMA is cosmetics --
+     * and the counts over 1/2/5 lines give the tail its shape. */
+    double raw_max = -1e9, raw_min = 1e9;
+    long n_gt1 = 0, n_gt2 = 0, n_gt5 = 0, n_stat = 0;
+    /* Outlier handling: the self-stamp's noise is FAT-TAILED -- a
+     * fifth of wakeups land more than a line late on this Pi, and
+     * rare ones land half a frame away. Hard rejection hurts both
+     * ways it can be built: judged against stillness it goes deaf
+     * to the loop's own slews (measured: 89% rejected, limit
+     * cycle); judged against prediction with a streak-escape, the
+     * escapes let half-frame liars yank the filter and the loop
+     * then steers the REAL beam into 18-line excursions. So:
+     * WINSORIZE. Every sample is clamped to the dead-reckoned
+     * prediction +/-3 lines -- the loop is never deaf (a true step
+     * walks it over at 3 lines a frame) and no liar can pull harder
+     * than 3 lines, once. The verdict reads the FILTERED
+     * trajectory: the beam integrates, it cannot teleport. */
+    long n_win = 0;
+    double pred = 0; int have_pred = 0;
+    double flt_max = -1e9, flt_min = 1e9;
+    uint32_t seq = 0; time_t t0 = time(NULL), last_note = 0;
+    time_t bucket_t0 = t0, last_shrink = t0;
+    double vb_eq = vblank_fix;
+    while (running && (seconds <= 0 || time(NULL) - t0 < seconds)) {
+        struct pollfd pf = {.fd = vfd, .events = POLLIN};
+        if (poll(&pf, 1, 2000) <= 0) {
+            fprintf(stderr, "bridge: no frame for 2s\n"); continue;
+        }
+        struct v4l2_buffer dq = {
+            .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+            .memory = V4L2_MEMORY_DMABUF};
+        dq.m.fd = dmabuf;
+        if (ioctl(vfd, VIDIOC_DQBUF, &dq) < 0) { perror("DQBUF"); break; }
+        /* Self-stamp at the DQBUF wakeup. This unicam SAYS its stamps
+         * are monotonic (flags 0x2000) and then delivers zero -- read
+         * raw off the bench, 2026-08-19. poll() wakes at frame-done,
+         * so under SCHED_FIFO our own clock IS the frame-end time to
+         * within scheduling jitter; the loop filter absorbs that. */
+        struct timespec dqts;
+        clock_gettime(CLOCK_MONOTONIC, &dqts);
+        double t_now = dqts.tv_sec + dqts.tv_nsec * 1e-9;
+        seq++;
+        pack_header(base.map, seq, SOURCE_ID_OV5647);
+        dq.m.fd = dmabuf;              /* same BO back into its slot */
+        if (ioctl(vfd, VIDIOC_QBUF, &dq) < 0) { perror("QBUF"); break; }
+
+        /* PHASE: sensor frame-end against the last display vblank,
+         * both on the kernel's monotonic clock. */
+        /* The CRTC is not necessarily index 0, and a vblank request
+         * names its CRTC in the HIGH_CRTC bits -- silently absent
+         * reports, not an error code, is how that one shows itself. */
+        drmVBlank vb = {.request = {
+            .type = DRM_VBLANK_RELATIVE
+                  | ((crtc_index << DRM_VBLANK_HIGH_CRTC_SHIFT)
+                     & DRM_VBLANK_HIGH_CRTC_MASK),
+            .sequence = 0}};
+        int vbrc = drmWaitVBlank(dfd, &vb);
+        if (vbrc && seq == 1)
+            fprintf(stderr, "WaitVBlank: %s (genlock disabled)\n",
+                    strerror(errno));
+        if (vbrc == 0) {
+            int bad = 0;
+            int stamped = dq.timestamp.tv_sec || dq.timestamp.tv_usec;
+            double t_dq = stamped ? to_mono(ts_sec(dq.timestamp), &bad)
+                                  : t_now;
+            double t_vb = to_mono((double)vb.reply.tval_sec
+                        + (double)vb.reply.tval_usec * 1e-6, &bad);
+            if (seq == 1)
+                printf("bridge: frame time from %s, vblank age %.4fs%s\n",
+                       stamped ? "driver stamp" : "DQBUF wakeup (self)",
+                       t_now - t_vb,
+                       bad ? " -- UNIDENTIFIED CLOCK, genlock blind" : "");
+            if (bad) continue;
+            double err = fmod(t_dq - t_vb - target, t_frame_d);
+            if (err > t_frame_d / 2) err -= t_frame_d;
+            if (err < -t_frame_d / 2) err += t_frame_d;
+            double lines = err / t_row_s;
+            double wrap = t_frame_d / t_row_s;
+            double v_cmd = (vblank_cmd - vblank_fix) * t_row_s / t_row_d;
+            if (have_pred) {
+                pred += v_cmd;
+                if (pred > wrap / 2) pred -= wrap;
+                if (pred < -wrap / 2) pred += wrap;
+            }
+            double used = lines;
+            if (have_pred) {
+                if (used > pred + 3.0) { used = pred + 3.0; n_win++; }
+                if (used < pred - 3.0) { used = pred - 3.0; n_win++; }
+            }
+            pred = used; have_pred = 1;
+            lines_f = (seq < 5) ? used : lines_f * 0.9 + used * 0.1;
+            if (locked) {
+                if (lines_f > flt_max) flt_max = lines_f;
+                if (lines_f < flt_min) flt_min = lines_f;
+                /* the ratchet's memory: worst positive excursion,
+                 * in six 5-minute buckets = a 30-minute window */
+                if (time(NULL) - bucket_t0 >= 300) {
+                    bucket_t0 = time(NULL);
+                    bucket_i = (bucket_i + 1) % 6;
+                    bucket_max[bucket_i] = 0;
+                }
+                if (lines_f > bucket_max[bucket_i])
+                    bucket_max[bucket_i] = lines_f;
+                double worst = 0;
+                for (int k = 0; k < 6; k++)
+                    if (bucket_max[k] > worst) worst = bucket_max[k];
+                /* Expansion judges the beam only from a SETTLED
+                 * loop: while the setpoint slews, every reading
+                 * carries the slew itself, and judging it expands
+                 * again -- the first launch rode that feedback
+                 * straight to the ceiling. So: no expansion during
+                 * a slew, and a 3-second cooldown after every step
+                 * for the PI to re-zero. */
+                if (m_cool > 0) m_cool--;
+                if (m_cool == 0 && margin == margin_goal
+                    && lines_f > margin - 4)
+                    margin_goal = lines_f + 4;      /* expand, now   */
+                if (time(NULL) - last_shrink >= 60) {
+                    last_shrink = time(NULL);
+                    if (margin_goal > worst + 4 && margin_goal > 4)
+                        margin_goal -= 1;           /* shrink, gently */
+                }
+                if (margin_goal < 4) margin_goal = 4;
+                if (margin_goal > 24) margin_goal = 24;
+                if (margin < margin_goal) { margin += 1; m_cool = 90; }
+                else if (margin > margin_goal) { margin -= 1; m_cool = 90; }
+                target = HEIGHT * t_row_s - margin * t_row_d;
+            }
+            /* A slow PI on the VBLANK knob, and only that knob:
+             * an HTS write is an I2C transaction landing WHEREVER
+             * the bus finishes -- mid-readout, on a sensor with no
+             * group hold, it glitches the row it lands on, one
+             * corrupted line per dither step at a random height
+             * (seen on the TV within the hour when hblank was the
+             * knob). A VBLANK write only means anything inside
+             * blanking, so it is glitch-free BY CONSTRUCTION. Hence
+             * the split: hblank sets the RATE once (line lock,
+             * never touched while streaming), vblank trims the
+             * PHASE. A LATE write beam needs a FASTER sensor: the
+             * trim subtracts. */
+            integ = integ * 0.995 + used;
+            int adj = (int)(0.30 * used + 0.02 * integ);
+            if (adj > 20) adj = 20;
+            if (adj < -20) adj = -20;
+            int cmd = vblank_fix - adj;
+            if (cmd < 24) cmd = 24;
+            if (cmd != vblank_cmd) {
+                set_ctrl(sfd, V4L2_CID_VBLANK, cmd, "vblank");
+                vblank_cmd = cmd;
+            }
+            /* where the trim SETTLES is telemetry: a persistent
+             * equilibrium away from nominal means the boot-time
+             * hblank rate estimate has aged (thermals) -- logged,
+             * and re-derived at the next stream start, never
+             * touched live. */
+            vb_eq = vb_eq * 0.999 + cmd * 0.001;
+            if (locked) {
+                n_stat++;
+                if (lines > raw_max) raw_max = lines;
+                if (lines < raw_min) raw_min = lines;
+                double a = fabs(lines);
+                if (a > 1) n_gt1++;
+                if (a > 2) n_gt2++;
+                if (a > 5) n_gt5++;
+            }
+            locked = locked || (lines_f > -3 && lines_f < 3);
+            if (time(NULL) - last_note >= 5) {
+                last_note = time(NULL);
+                printf("bridge: seq %u (%.1f fps), phase %+.2f lines, "
+                       "vblank %d, margin %.0f, %s raw[%+.2f..%+.2f] "
+                       ">1:%ld >2:%ld >5:%ld of %ld\n", seq,
+                       seq / (double)(time(NULL) - t0 ? : 1),
+                       lines_f, vblank_cmd, margin,
+                       locked ? "LOCKED" : "acquiring",
+                       raw_min, raw_max, n_gt1, n_gt2, n_gt5, n_stat);
+                if (vb_eq - vblank_fix > 3 || vblank_fix - vb_eq > 3)
+                    printf("bridge: vblank equilibrium %.1f -- hblank "
+                           "rate estimate aging\n", vb_eq);
+                if (n_win)
+                    printf("bridge: beam flt[%+.2f..%+.2f], %ld stamps "
+                           "winsorized\n", flt_min, flt_max, n_win);
+            }
+        }
+        struct bridge_frame bf = {
+            .seq = seq, .phase_lines = lines_f,
+            .locked = locked, .sensor_fd = sfd};
+        bridge_frame_hook(&bf);
+    }
+    if (n_stat)
+        printf("bridge: SOAK VERDICT over %ld locked frames: BEAM "
+               "(filtered) [%+.2f..%+.2f] lines; adaptive margin "
+               "settled at %.0f (goal %.0f). Stamps (raw) "
+               "[%+.2f..%+.2f], beyond 1/2/5 lines: %ld/%ld/%ld, "
+               "%ld winsorized.\n",
+               n_stat, flt_min, flt_max, margin, margin_goal,
+               raw_min, raw_max, n_gt1, n_gt2, n_gt5, n_win);
+    ioctl(vfd, VIDIOC_STREAMOFF, &type);
+    close(vfd); close(sfd); close(dmabuf); close(dfd);
+    printf("bridge: %u frames\n", seq);
+    return 0;
+}

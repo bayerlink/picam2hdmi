@@ -73,6 +73,18 @@ def main(argv=None) -> int:
                              "for Y-only capture paths (cheap YUY2 dongles); "
                              "pick a small --width/--height, capacity is 1/40")
 
+    bridge = sub.add_parser(
+        "bridge",
+        help="the line-latency bridge: built on this device from the C "
+             "source the package carries (plus any modules), then run. "
+             "Unrecognised arguments go to the daemon itself")
+    bridge.add_argument("--rebuild", action="store_true",
+                        help="force a recompile even if the source is "
+                             "unchanged")
+    bridge.add_argument("--build-only", action="store_true",
+                        help="build and twin-check, print the binary "
+                             "path, run nothing")
+
     daemon = sub.add_parser(
         "serve", help="run as a bench instrument: HTTP control of the "
                       "stream, uploadable recordings (see picam2hdmi/serve.py)")
@@ -98,7 +110,25 @@ def main(argv=None) -> int:
                              "it where two cameras of the SAME model run at "
                              "once -- the field is what tells their streams "
                              "apart, and a model-derived one cannot")
-    args = parser.parse_args(argv)
+    args, extra = parser.parse_known_args(argv)
+
+    if args.command == "bridge":
+        import os
+
+        from . import native
+        binary = native.ensure_built(rebuild=args.rebuild)
+        if not native.check(binary):
+            print("bridge: C and Python headers DISAGREE -- refusing "
+                  "to run a bridge that packs the wrong bytes",
+                  file=sys.stderr)
+            return 1
+        if args.build_only:
+            print(binary)
+            return 0
+        os.execv(binary, [str(binary)] + extra)
+
+    if extra:
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
 
     if args.command == "pattern":
         width, _, height = args.display.partition("x")

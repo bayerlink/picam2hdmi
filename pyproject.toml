@@ -39,6 +39,13 @@ Homepage = "https://github.com/bayerlink/picam2hdmi"
 Source = "https://github.com/bayerlink/picam2hdmi"
 Issues = "https://github.com/bayerlink/picam2hdmi/issues"
 
+[tool.setuptools.package-data]
+# The C bridge travels as SOURCE and is compiled on the device it runs
+# on (picam2hdmi/native.py) -- the binary is a function of bridge.c
+# plus the modules present, so a prebuilt one would be a lie waiting
+# for its first module.
+picam2hdmi = ["csrc/*", "csrc/modules/*"]
+
 [project.scripts]
 picam2hdmi = "picam2hdmi.cli:main"
 
