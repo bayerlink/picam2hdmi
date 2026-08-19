@@ -62,6 +62,13 @@ u8, u32, u64 = ctypes.c_uint8, ctypes.c_uint32, ctypes.c_uint64
 WIDTH, HEIGHT = 1920, 1080          # the ov5647's native 1080p mode
 CONTAINER_HZ = 30
 BITS = 10
+# The header's order is OUR claim, and for ov5647 1080p the driver's
+# GBRG is CORRECT -- confirmed 2026-08-19 by walking all four orders
+# against REAL LIGHT (BGGR mixed, GRBG swapped R/B, GBRG true). The
+# sensor's colour-bar pattern briefly "proved" otherwise and that was
+# the lesson: the test pattern carries the GENERATOR's parity, one
+# column off the array's crop parity -- bars validate transport and
+# demosaic, never the mosaic phase of real light.
 BAYER_ORDER = "GBRG"                # pGAA: 10-bit GBGB/RGRG packed
 LINE_BYTES = WIDTH * BITS // 8      # 2400 packed bytes per sensor line
 
