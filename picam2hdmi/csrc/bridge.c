@@ -326,11 +326,21 @@ int main(int argc, char **argv) {
         drmModeConnectorPtr c = drmModeGetConnector(dfd, res->connectors[i]);
         if (c && c->connection == DRM_MODE_CONNECTED) {
             connector_id = c->connector_id;
-            drmModeEncoderPtr e = c->encoder_id
-                ? drmModeGetEncoder(dfd, c->encoder_id) : NULL;
-            uint32_t possible = e ? e->possible_crtcs : 0xFF;
-            if (e && e->crtc_id) crtc_id = e->crtc_id;
-            drmModeFreeEncoder(e);
+            /* The CRTC comes from the connector's ENCODERS' mask --
+             * never from a guess. An all-ones fallback once picked
+             * CRTC 0, which on vc4 is txp, the writeback engine: a
+             * perfectly real CRTC that can never drive HDMI, and an
+             * EINVAL that names no names. The encoder knows which
+             * CRTCs can reach the wire; ask it. */
+            uint32_t possible = 0;
+            for (int j = 0; j < c->count_encoders; j++) {
+                drmModeEncoderPtr e =
+                    drmModeGetEncoder(dfd, c->encoders[j]);
+                if (!e) continue;
+                if (e->crtc_id && !crtc_id) crtc_id = e->crtc_id;
+                possible |= e->possible_crtcs;
+                drmModeFreeEncoder(e);
+            }
             for (int k = 0; k < res->count_crtcs; k++)
                 if (crtc_id ? res->crtcs[k] == crtc_id
                             : (possible & (1u << k))) {

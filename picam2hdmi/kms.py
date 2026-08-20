@@ -384,9 +384,24 @@ class Card:
             self._ioctl(IOCTL_GETENCODER, encoder)
             crtc_id = encoder.crtc_id or None
         if crtc_id is None:
-            if not res.count_crtcs:
-                raise RuntimeError("device has no CRTCs")
-            crtc_id = crtc_ids[0]
+            # The encoders' mask, never a guess. crtc_ids[0] on vc4 is
+            # txp -- the writeback engine, a real CRTC that can never
+            # drive HDMI -- and picking it earns an EINVAL that names
+            # no names. The encoder knows which CRTCs reach the wire;
+            # ask every encoder this connector owns.
+            self._get_connector(cid)          # refresh self._encoders
+            possible = 0
+            for eid in self._encoders:
+                e = GetEncoder(encoder_id=eid)
+                self._ioctl(IOCTL_GETENCODER, e)
+                possible |= e.possible_crtcs
+            for k, c_id in enumerate(crtc_ids):
+                if possible & (1 << k):
+                    crtc_id = c_id
+                    break
+            if crtc_id is None:
+                raise RuntimeError(
+                    "no CRTC reachable from the connector's encoders")
         return cid, crtc_id, modes
 
     def _get_connector(self, connector_id: int):
@@ -395,12 +410,14 @@ class Card:
         modes = (ModeInfo * max(1, conn.count_modes))()
         props = (u32 * max(1, conn.count_props))()
         values = (u64 * max(1, conn.count_props))()
+        encs = (u32 * max(1, conn.count_encoders))()
         conn.modes_ptr = ctypes.addressof(modes)
         conn.props_ptr = ctypes.addressof(props)
         conn.prop_values_ptr = ctypes.addressof(values)
-        conn.count_encoders = 0
+        conn.encoders_ptr = ctypes.addressof(encs)
         self._ioctl(IOCTL_GETCONNECTOR, conn)
         self._props = list(props[:conn.count_props])
+        self._encoders = list(encs[:conn.count_encoders])
         return conn, list(modes[:conn.count_modes])
 
     # -- the one policy --------------------------------------------------------#
