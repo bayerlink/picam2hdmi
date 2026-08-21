@@ -1,0 +1,21 @@
+# The bench panel: the instrument's web UI (module uploads, the ISP
+# parameter widgets, recordings). On a bridge bench it must NOT
+# stream -- the C bridge owns the camera and the display -- so it
+# starts idle and stays idle unless told otherwise; the panel's
+# value here is the /modules and /isp surfaces. Root because module
+# uploads compile into the installed package tree and the bridge
+# service gets restarted on install.
+#   sudo cp panel.service /etc/systemd/system/
+#   sudo systemctl enable --now panel
+[Unit]
+Description=picam2hdmi bench panel (web UI)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/picam2hdmi serve --no-autostart
+Restart=always
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target

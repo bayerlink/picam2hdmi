@@ -108,6 +108,11 @@ __attribute__((weak)) void bridge_frame_hook(const struct bridge_frame *f) {
 __attribute__((weak)) void bridge_link_hook(const struct bridge_link *l) {
     (void)l;
 }
+__attribute__((weak)) void bridge_command_hook(const char *cmd, char *reply,
+                                               size_t cap) {
+    (void)cmd;
+    snprintf(reply, cap, "err no installed module speaks commands");
+}
 
 /* ---------------------------------------------------------------- */
 /* The far-end register channel: the display cable's own I2C bus.   */
@@ -229,6 +234,66 @@ static int link_read_state(uint8_t **edid_out) {
         }
     }
     return up;
+}
+
+/* ---------------------------------------------------------------- */
+/* The control socket: the web panel's path to the module. One      */
+/* short text command per connection; the bridge owns the transport */
+/* and forwards the line to bridge_command_hook, because only the   */
+/* module knows what its far end's registers mean. Lives in /run so */
+/* a stale socket dies with the boot, mode 0666 because the panel   */
+/* daemon is not root and a bench instrument's localhost is its     */
+/* console.                                                         */
+/* ---------------------------------------------------------------- */
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+
+#define CTL_PATH "/run/bridge.sock"
+static int ctl_fd = -1;
+
+static void ctl_open(void) {
+    unlink(CTL_PATH);
+    ctl_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (ctl_fd < 0) return;
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    snprintf(a.sun_path, sizeof a.sun_path, "%s", CTL_PATH);
+    if (bind(ctl_fd, (struct sockaddr *)&a, sizeof a) < 0 ||
+        listen(ctl_fd, 4) < 0) {
+        fprintf(stderr, "bridge: no control socket (%s); commands off\n",
+                strerror(errno));
+        close(ctl_fd);
+        ctl_fd = -1;
+        return;
+    }
+    chmod(CTL_PATH, 0666);
+}
+
+/* Nonblocking on the frame path: the client connects, sends its
+ * whole line, then reads, so by the time accept() hands over the
+ * socket the command is normally already buffered and one read gets
+ * it. If it is not, ONE bounded 5 ms grace -- a command arrives at
+ * human cadence and may cost a frame's slack; it may never cost the
+ * loop an unbounded wait. */
+static void ctl_poll(void) {
+    if (ctl_fd < 0) return;
+    int c = accept4(ctl_fd, NULL, NULL, SOCK_NONBLOCK);
+    if (c < 0) return;
+    char cmd[256], reply[256];
+    ssize_t n = read(c, cmd, sizeof cmd - 1);
+    if (n < 0) {
+        struct pollfd p = {.fd = c, .events = POLLIN};
+        if (poll(&p, 1, 5) > 0) n = read(c, cmd, sizeof cmd - 1);
+    }
+    if (n > 0) {
+        while (n && (cmd[n - 1] == '\n' || cmd[n - 1] == '\r')) n--;
+        cmd[n] = 0;
+        reply[0] = 0;
+        bridge_command_hook(cmd, reply, sizeof reply);
+        ssize_t w = write(c, reply, strlen(reply));
+        (void)w;
+    }
+    close(c);
 }
 
 static void link_watch(int force) {
@@ -588,6 +653,7 @@ int main(int argc, char **argv) {
 
     /* the module hears the initial link state before the first frame */
     link_watch(1);
+    ctl_open();
 
     /* --- the loop: DQBUF, header, genlock, QBUF -------------------- */
     /* WHERE the margin lives: the writer's line time is shorter than
@@ -823,6 +889,8 @@ int main(int argc, char **argv) {
         bridge_frame_hook(&bf);
         /* once a second: cheap, and a replug never waits long */
         if ((seq & 31) == 0) link_watch(0);
+        /* every frame: an accept() that mostly returns EAGAIN */
+        ctl_poll();
     }
     if (n_stat)
         printf("bridge: SOAK VERDICT over %ld locked frames: BEAM "

@@ -102,6 +102,22 @@
   section.below h2 { margin: 0 0 .6rem; font-size: .8rem;
                      text-transform: uppercase; letter-spacing: .09em;
                      color: #8b949e; }
+  /* the ISP panel: widgets straight from the register map */
+  #ispform details { border: 1px solid #30363d; border-radius: 6px;
+                     margin: .4rem 0; padding: .1rem .6rem; }
+  #ispform summary { cursor: pointer; color: #8b949e; padding: .3rem 0;
+                     font-family: ui-monospace, monospace; }
+  .ispreg { display: grid; grid-template-columns: 11rem 1fr 5.5rem;
+            gap: .6rem; align-items: center; padding: .22rem 0; }
+  .ispreg .k { color: #e6edf3; font-family: ui-monospace, monospace;
+               font-size: .85rem; word-break: break-all; }
+  .ispreg .raw { color: #57606a; font-variant-numeric: tabular-nums;
+                 font-size: .8rem; text-align: right; }
+  .ispreg input[type=range] { width: 100%; }
+  .ispreg.dirty .k { color: #d29922; }
+  #ispbar { display: flex; gap: .6rem; align-items: center;
+            flex-wrap: wrap; }
+  #ispnote { color: #8b949e; font-size: .85rem; }
 </style>
 
 <header>
@@ -158,6 +174,27 @@
     <h2>Emitting now</h2>
     <img id="preview" alt="nothing streaming">
     <div id="previewcap"></div>
+  </section>
+
+  <section class="below" id="ispwrap">
+    <h2>ISP parameters</h2>
+    <div id="ispbar">
+      <button id="ispload" onclick="ispLoad()">Load panel</button>
+      <button id="ispread" onclick="ispReadBack()" hidden>Read back</button>
+      <button id="ispcommit" class="go" onclick="ispCommit()" hidden>
+        Commit</button>
+      <span id="ispnote">widgets come from the installed ISP module's
+        register map; writes land in a shadow until Commit</span>
+    </div>
+    <div id="ispform"></div>
+  </section>
+
+  <section class="below" id="modwrap">
+    <h2>Modules</h2>
+    <div id="modnote" style="color:#8b949e;font-size:.85rem">
+      compiled into the bridge on upload — a package that does not
+      build does not stay installed</div>
+    <div id="modlist"></div>
   </section>
   </div>
 
@@ -656,4 +693,208 @@ refresh();
 fetchCameras();
 setInterval(refresh, 1500);
 setInterval(fetchCameras, 30000);   // a reseated ribbon shows up by itself
+
+/* ---- ISP parameters: widgets straight from the register map ------ */
+/* The map states everything (widget kind, min/max, Q format, choices,
+ * description); this code renders and never decides. Loaded on demand:
+ * every read-back is real traffic on the display cable's I2C. */
+let ispRegs = {};                  // key -> its map entry
+
+function ispSigned(reg, raw) {     // raw bus word -> the register's value
+  return reg.signed && raw >= (1 << (reg.bits - 1))
+    ? raw - (1 << reg.bits) : raw;
+}
+
+function ispWidget(key, reg) {
+  const scale = 1 << reg.frac;
+  if (reg.widget === 'checkbox') {
+    const b = document.createElement('input');
+    b.type = 'checkbox';
+    b.checked = !!reg.default;
+    b.onchange = () => ispSet(key, b.checked ? 1 : 0);
+    b._show = raw => { b.checked = !!raw; };
+    return b;
+  }
+  if (reg.widget === 'choice') {
+    const s = document.createElement('select');
+    for (const c of reg.choices) {
+      const o = document.createElement('option');
+      o.value = c.value; o.textContent = c.label;
+      s.appendChild(o);
+    }
+    s.value = reg.default;
+    s.onchange = () => ispSet(key, Number(s.value));
+    s._show = raw => { s.value = raw; };
+    return s;
+  }
+  if (reg.widget === 'fixed') {
+    const n = document.createElement('input');
+    n.type = 'number';
+    n.min = reg.min / scale;
+    n.max = reg.max / scale;
+    n.step = 1 / scale;
+    n.value = ispSigned(reg, reg.default) / scale;
+    n.title = reg.q_format;
+    n.onchange = () => ispSet(key, Math.round(Number(n.value) * scale));
+    n._show = raw => { n.value = ispSigned(reg, raw) / scale; };
+    return n;
+  }
+  const wrap = document.createElement('span');   // slider + its echo
+  wrap.style.display = 'flex'; wrap.style.gap = '.5rem';
+  const r = document.createElement('input');
+  const e = document.createElement('input');
+  r.type = 'range'; e.type = 'number';
+  r.min = e.min = reg.min; r.max = e.max = reg.max;
+  r.value = e.value = reg.default;
+  r.oninput = () => { e.value = r.value; };
+  r.onchange = () => ispSet(key, Number(r.value));
+  e.onchange = () => { r.value = e.value; ispSet(key, Number(e.value)); };
+  wrap.appendChild(r); wrap.appendChild(e);
+  wrap._show = raw => { const v = ispSigned(reg, raw); r.value = v; e.value = v; };
+  return wrap;
+}
+
+async function ispLoad() {
+  err('');
+  let map;
+  try { map = await api('GET', '/isp/params'); }
+  catch (x) { return err('ISP panel: ' + x.message); }
+  const form = $('ispform');
+  form.textContent = '';
+  ispRegs = {};
+  for (const block of map.blocks) {
+    const regs = block.registers.filter(r =>
+      !(block.path === 'pipe' && r.name === 'commit'));  // that is the button
+    if (!regs.length) continue;
+    const d = document.createElement('details');
+    d.open = block.path !== 'pipe';
+    const s = document.createElement('summary');
+    s.textContent = block.path;
+    d.appendChild(s);
+    for (const reg of regs) {
+      const key = block.path + '.' + reg.name;
+      ispRegs[key] = reg;
+      const row = document.createElement('div');
+      row.className = 'ispreg';
+      row.id = 'isp:' + key;
+      const k = document.createElement('span');
+      k.className = 'k'; k.textContent = reg.name;
+      k.title = reg.description + ' [' + reg.q_format + ']';
+      const w = ispWidget(key, reg);
+      const raw = document.createElement('span');
+      raw.className = 'raw'; raw.textContent = '·';
+      row.appendChild(k); row.appendChild(w); row.appendChild(raw);
+      row._widget = w; row._raw = raw;
+      d.appendChild(row);
+    }
+    form.appendChild(d);
+  }
+  $('ispload').hidden = true;
+  $('ispread').hidden = false;
+  $('ispcommit').hidden = false;
+  $('ispnote').textContent = 'showing reset values — Read back asks the ' +
+    'far end over the cable';
+}
+
+async function ispReadBack() {
+  err('');
+  $('ispnote').textContent = 'reading the far end…';
+  let got;
+  try { got = await api('GET', '/isp/values'); }
+  catch (x) { $('ispnote').textContent = ''; return err('ISP: ' + x.message); }
+  for (const [key, raw] of Object.entries(got.values)) {
+    const row = document.getElementById('isp:' + key);
+    if (!row) continue;
+    row._widget._show(raw);
+    row._raw.textContent = raw;
+    row.classList.remove('dirty');
+  }
+  $('ispnote').textContent = got.unreachable.length
+    ? got.unreachable.length + ' keys unreachable — is the cable up?'
+    : 'live values, straight off the far end';
+}
+
+async function ispSet(key, raw) {
+  err('');
+  const row = document.getElementById('isp:' + key);
+  try {
+    await api('POST', '/isp/set', {key, value: raw});
+    if (row) { row.classList.add('dirty'); row._raw.textContent = raw; }
+    $('ispnote').textContent = 'shadowed — Commit applies at a frame ' +
+      'boundary';
+  } catch (x) { err('ISP set: ' + x.message); }
+}
+
+/* ---- module slots: what is compiled in, and the upload path ------ */
+const MOD_SLOTS = ['isp', 'sensor', 'algo'];
+
+async function loadModules() {
+  let mods;
+  try { mods = await api('GET', '/modules'); }
+  catch (x) { return err('modules: ' + x.message); }
+  const list = $('modlist');
+  list.textContent = '';
+  for (const slot of MOD_SLOTS) {
+    const m = mods[slot];
+    const row = document.createElement('div');
+    row.className = 'ispreg';
+    const k = document.createElement('span');
+    k.className = 'k';
+    k.textContent = slot;
+    const mid = document.createElement('span');
+    mid.textContent = m ? (m.name + ' ' + (m.version || ''))
+                        : 'empty';
+    mid.style.color = m ? '#e6edf3' : '#57606a';
+    const acts = document.createElement('span');
+    acts.style.display = 'flex'; acts.style.gap = '.4rem';
+    const pick = document.createElement('input');
+    pick.type = 'file'; pick.accept = '.tar.gz,.tgz,application/gzip';
+    pick.style.display = 'none';
+    pick.onchange = async () => {
+      if (!pick.files.length) return;
+      err('');
+      $('modnote').textContent = 'uploading ' + pick.files[0].name +
+        ' — compiling on the device…';
+      try {
+        const r = await api('PUT', '/modules/' + slot, pick.files[0]);
+        $('modnote').textContent = 'installed ' + r.installed +
+          (r.bridge_restarted ? ' — bridge restarted' : '');
+      } catch (x) {
+        $('modnote').textContent = '';
+        err('install ' + slot + ': ' + x.message);
+      }
+      loadModules();
+    };
+    const up = document.createElement('button');
+    up.textContent = m ? 'Replace' : 'Install';
+    up.onclick = () => pick.click();
+    acts.appendChild(up);
+    if (m) {
+      const rm = document.createElement('button');
+      rm.textContent = 'Remove'; rm.className = 'warn';
+      rm.onclick = async () => {
+        err('');
+        try { await api('DELETE', '/modules/' + slot); }
+        catch (x) { err('remove ' + slot + ': ' + x.message); }
+        loadModules();
+      };
+      acts.appendChild(rm);
+    }
+    acts.appendChild(pick);
+    row.appendChild(k); row.appendChild(mid); row.appendChild(acts);
+    list.appendChild(row);
+  }
+}
+loadModules();
+
+async function ispCommit() {
+  err('');
+  try {
+    await api('POST', '/isp/commit');
+    document.querySelectorAll('.ispreg.dirty')
+      .forEach(r => r.classList.remove('dirty'));
+    $('ispnote').textContent = 'committed — one coherent set, on a frame ' +
+      'boundary';
+  } catch (x) { err('ISP commit: ' + x.message); }
+}
 </script>

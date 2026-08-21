@@ -19,6 +19,7 @@
 #ifndef BRIDGE_H
 #define BRIDGE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 struct bridge_frame {
@@ -53,5 +54,16 @@ void bridge_link_hook(const struct bridge_link *l);
  * -- which a module must expect: cables are cables. */
 int bridge_ddc_write(uint16_t reg, uint32_t value);
 int bridge_ddc_read(uint16_t reg, uint32_t *value);
+
+/* The COMMAND hook: one short text line from the local control
+ * surface (the instrument's web panel, via the bridge's UNIX socket
+ * at /run/bridge.sock -- one command per connection). The bridge
+ * owns the transport and nothing else: only a module knows what its
+ * far end's registers mean, so the vocabulary is the module's. Fill
+ * `reply` (NUL-terminated, within `cap`) with "ok ..." or
+ * "err <reason>"; the transport sends it verbatim. Called on the
+ * frame thread between frames -- same budget rules as the frame
+ * hook. */
+void bridge_command_hook(const char *cmd, char *reply, size_t cap);
 
 #endif

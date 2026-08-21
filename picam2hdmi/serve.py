@@ -579,6 +579,35 @@ def _chain(first, rest):
 # HTTP surface
 # ----------------------------------------------------------------------------- #
 
+def _bridge_command(line: str) -> str:
+    """One command over the bridge's control socket, one reply.
+
+    The bridge owns the far-end register channel and the module in it
+    owns the vocabulary; this daemon is transport between the browser
+    and that socket, and adds no meaning of its own.
+    """
+    import socket as sockets
+
+    s = sockets.socket(sockets.AF_UNIX, sockets.SOCK_STREAM)
+    s.settimeout(2.0)
+    try:
+        s.connect("/run/bridge.sock")
+        s.sendall(line.encode() + b"\n")
+        return s.recv(4096).decode(errors="replace").strip()
+    finally:
+        s.close()
+
+
+def _isp_regmap():
+    """The register map the installed ISP module carries, or None."""
+    from . import modules_mgr
+
+    path = modules_mgr.slot_dir("isp") / "regmap.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
 def _handler(supervisor: Supervisor):
     class Handler(BaseHTTPRequestHandler):
         server_version = "picam2hdmi"
@@ -645,6 +674,38 @@ def _handler(supervisor: Supervisor):
             if self.path == "/modules":
                 from . import modules_mgr
                 return self._send(200, modules_mgr.status())
+            if self.path == "/isp/params":
+                regmap = _isp_regmap()
+                if regmap is None:
+                    return self._send(404, {
+                        "error": "no ISP module installed, or it predates "
+                                 "the map-carrying package format -- "
+                                 "reinstall the isp slot"})
+                return self._send(200, regmap)
+            if self.path == "/isp/values":
+                # Read every register back off the far end, one command
+                # per key. Sequential and a little slow by design: the
+                # DDC wire is the truth being asked for, and the panel
+                # asks once, on demand.
+                regmap = _isp_regmap()
+                if regmap is None:
+                    return self._send(404, {"error": "no ISP module "
+                                                     "installed"})
+                values, unreachable = {}, []
+                try:
+                    for block in regmap["blocks"]:
+                        for register in block["registers"]:
+                            k = f"{block['path']}.{register['name']}"
+                            r = _bridge_command(f"get {k}")
+                            if r.startswith("ok "):
+                                values[k] = int(r[3:])
+                            else:
+                                unreachable.append(k)
+                except (OSError, ValueError) as error:
+                    return self._send(503, {
+                        "error": f"bridge control socket: {error}"})
+                return self._send(200, {"values": values,
+                                        "unreachable": unreachable})
             if self.path == "/recordings":
                 return self._send(200, {"recordings":
                                         supervisor.status()["spool"]})
@@ -718,6 +779,36 @@ def _handler(supervisor: Supervisor):
                 except ValueError as error:
                     return self._send(400, {"error": str(error)})
                 return self._send(200, {"saved": name})
+            if self.path == "/isp/set":
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                    key, value = str(body["key"]), int(body["value"])
+                except (ValueError, KeyError) as error:
+                    return self._send(400, {
+                        "error": f'/isp/set takes {{"key": '
+                                 f'"block.register", "value": raw-int}}: '
+                                 f"{error}"})
+                if any(c.isspace() for c in key):
+                    return self._send(400, {"error": "key cannot contain "
+                                                     "whitespace"})
+                try:
+                    r = _bridge_command(f"set {key} {value}")
+                except OSError as error:
+                    return self._send(503, {
+                        "error": f"bridge control socket: {error}"})
+                if not r.startswith("ok"):
+                    return self._send(400, {"error": r})
+                return self._send(200, {"set": key, "value": value})
+            if self.path == "/isp/commit":
+                try:
+                    r = _bridge_command("commit")
+                except OSError as error:
+                    return self._send(503, {
+                        "error": f"bridge control socket: {error}"})
+                if not r.startswith("ok"):
+                    return self._send(400, {"error": r})
+                return self._send(200, {"committed": True})
             self._send(404, {"error": "unknown path"})
 
         def do_DELETE(self):
