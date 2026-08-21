@@ -499,6 +499,7 @@ int main(int argc, char **argv) {
     double pred = 0; int have_pred = 0;
     double flt_max = -1e9, flt_min = 1e9;
     uint32_t seq = 0; time_t t0 = time(NULL), last_note = 0;
+    time_t last_verdict = time(NULL);
     time_t bucket_t0 = t0, last_shrink = t0;
     double vb_eq = vblank_fix;
     while (running && (seconds <= 0 || time(NULL) - t0 < seconds)) {
@@ -659,6 +660,21 @@ int main(int argc, char **argv) {
                 if (n_win)
                     printf("bridge: beam flt[%+.2f..%+.2f], %ld stamps "
                            "winsorized\n", flt_min, flt_max, n_win);
+                /* Under a supervisor there is no exit to print the
+                 * soak verdict at, so it testifies hourly instead:
+                 * an unbounded run must still report, or the bound
+                 * was the only thing making it honest. */
+                if (n_stat && time(NULL) - last_verdict >= 3600) {
+                    last_verdict = time(NULL);
+                    printf("bridge: HOURLY over %ld locked frames: "
+                           "BEAM (filtered) [%+.2f..%+.2f] lines; "
+                           "margin %.0f (goal %.0f); raw "
+                           "[%+.2f..%+.2f], >1/2/5: %ld/%ld/%ld, "
+                           "%ld winsorized.\n",
+                           n_stat, flt_min, flt_max, margin,
+                           margin_goal, raw_min, raw_max,
+                           n_gt1, n_gt2, n_gt5, n_win);
+                }
             }
         }
         struct bridge_frame bf = {

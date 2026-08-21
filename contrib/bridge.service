@@ -1,0 +1,26 @@
+# The genlocked camera bridge as a bench fixture: power on, the
+# sensor streams line-locked to the HDMI output, forever. Install
+# (after `picam2hdmi bridge --build`, or make in the csrc directory,
+# has produced the binary):
+#   sudo cp bridge.service /etc/systemd/system/
+#   sudo systemctl enable --now bridge
+#
+# Supervised, not bounded: the bench rule is that nothing runs
+# unwatched, and a supervisor satisfies it better than a timer -- a
+# bounded run ends by design at the worst possible hour, while a
+# supervised one restarts on any exit and keeps testifying (the
+# bridge prints its soak verdict hourly under a supervisor, since
+# there is no exit to print it at). journald owns the log rotation.
+[Unit]
+Description=bayerlink camera bridge (sensor-genlocked HDMI source)
+After=multi-user.target
+
+[Service]
+ExecStart=/home/pi/bridge/bridge --gain 200
+Restart=always
+RestartSec=2
+# KMS master and V4L2 subdev access need root on a stock Pi OS Lite.
+User=root
+
+[Install]
+WantedBy=multi-user.target
