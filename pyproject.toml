@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "picam2hdmi"
-version = "0.3.0"
+version = "0.4.0"
 description = "Raspberry Pi camera as a raw-Bayer HDMI source, speaking the bayerlink protocol"
 readme = "README.md"
 license = "MIT"
