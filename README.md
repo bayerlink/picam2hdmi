@@ -84,7 +84,10 @@ The link must deliver bytes unmodified: **full-range RGB, no scaling, no
 overscan, RGB 4:4:4**. The most common failure is a limited-range clamp
 (16–235) quietly destroying sample values; the `checker` and `corners`
 patterns exist to catch exactly that on day one. Details and the receiver
-rate rule are in [PROTOCOL.md](PROTOCOL.md).
+rate rule are in [PROTOCOL.md](PROTOCOL.md). The frame count is kept
+exact too: the bridge genlocks the HDMI output to the sensor so every
+captured frame leaves the cable exactly once — why and how in
+[GENLOCK.md](GENLOCK.md).
 
 ## Why this exists
 
