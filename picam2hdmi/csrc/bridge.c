@@ -100,10 +100,147 @@ static void on_sig(int sig) { (void)sig; running = 0; }
 
 static void die(const char *what) { perror(what); exit(1); }
 
-/* The default hook does nothing; a module in modules/ overrides it
- * (weak symbol) and is compiled in by the on-device rebuild. */
+/* The default hooks do nothing; a module in modules/ overrides them
+ * (weak symbols) and is compiled in by the on-device rebuild. */
 __attribute__((weak)) void bridge_frame_hook(const struct bridge_frame *f) {
     (void)f;
+}
+__attribute__((weak)) void bridge_link_hook(const struct bridge_link *l) {
+    (void)l;
+}
+
+/* ---------------------------------------------------------------- */
+/* The far-end register channel: the display cable's own I2C bus.   */
+/* The receiver answers at 0x37 (16-bit register address, 32-bit    */
+/* big-endian value, auto-increment). The bus NUMBER is a fact      */
+/* about this Pi's wiring, so it is probed, not configured: the     */
+/* first /dev/i2c-* where 0x37 answers a read is the cable.         */
+/* ---------------------------------------------------------------- */
+#include <linux/i2c.h>
+#include <linux/i2c-dev.h>
+
+static int ddc_fd = -1;
+
+static int ddc_try_bus(int n) {
+    char path[32];
+    snprintf(path, sizeof path, "/dev/i2c-%d", n);
+    int fd = open(path, O_RDWR);
+    if (fd < 0) return -1;
+    uint8_t reg[2] = {0, 0}, val[4];
+    struct i2c_msg m[2] = {
+        { .addr = 0x37, .flags = 0,        .len = 2, .buf = reg },
+        { .addr = 0x37, .flags = I2C_M_RD, .len = 4, .buf = val },
+    };
+    struct i2c_rdwr_ioctl_data x = { .msgs = m, .nmsgs = 2 };
+    if (ioctl(fd, I2C_RDWR, &x) == 2) return fd;
+    close(fd);
+    return -1;
+}
+
+/* The connector DIR's `ddc` symlink names the one bus that is this
+ * cable -- never scan: 0x37 is also DDC/CI, and a blind probe could
+ * find a real monitor on the other port. */
+static void ddc_probe(const char *conn_dir) {
+    if (ddc_fd >= 0) { close(ddc_fd); ddc_fd = -1; }
+    char link[160], tgt[160];
+    snprintf(link, sizeof link, "%s/ddc", conn_dir);
+    ssize_t n = readlink(link, tgt, sizeof tgt - 1);
+    if (n <= 0) return;
+    tgt[n] = 0;
+    const char *base = strrchr(tgt, '/');
+    base = base ? base + 1 : tgt;          /* "i2c-N" */
+    int bus = -1;
+    if (sscanf(base, "i2c-%d", &bus) != 1) return;
+    ddc_fd = ddc_try_bus(bus);
+    if (ddc_fd >= 0)
+        printf("bridge: far-end registers answering on %s\n", base);
+}
+
+int bridge_ddc_write(uint16_t r, uint32_t value) {
+    if (ddc_fd < 0) { errno = ENODEV; return -1; }
+    uint8_t buf[6] = { r >> 8, r & 0xFF,
+                       value >> 24, value >> 16, value >> 8, value };
+    struct i2c_msg m = { .addr = 0x37, .flags = 0, .len = 6, .buf = buf };
+    struct i2c_rdwr_ioctl_data x = { .msgs = &m, .nmsgs = 1 };
+    return ioctl(ddc_fd, I2C_RDWR, &x) == 1 ? 0 : -1;
+}
+
+int bridge_ddc_read(uint16_t r, uint32_t *value) {
+    if (ddc_fd < 0) { errno = ENODEV; return -1; }
+    uint8_t reg[2] = { r >> 8, r & 0xFF }, val[4];
+    struct i2c_msg m[2] = {
+        { .addr = 0x37, .flags = 0,        .len = 2, .buf = reg },
+        { .addr = 0x37, .flags = I2C_M_RD, .len = 4, .buf = val },
+    };
+    struct i2c_rdwr_ioctl_data x = { .msgs = m, .nmsgs = 2 };
+    if (ioctl(ddc_fd, I2C_RDWR, &x) != 2) return -1;
+    *value = (uint32_t)val[0] << 24 | (uint32_t)val[1] << 16
+           | (uint32_t)val[2] << 8 | val[3];
+    return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* The link watch: HPD via sysfs, cheap enough for once a second.    */
+/* On every edge the DDC bus is re-probed, the sink's EDID re-read   */
+/* (the kernel already keeps it in sysfs), and the link hook runs -- */
+/* which is where a module writes the far end's registers back:      */
+/* a receiver forgets on power loss, and the sensor's owner is the   */
+/* one who knows what to restore.                                    */
+/* ---------------------------------------------------------------- */
+static uint8_t sink_edid[256];
+
+static char conn_dir[128];
+
+static int link_read_state(uint8_t **edid_out) {
+    static char status_path[144], edid_path[144];
+    *edid_out = NULL;
+    if (!status_path[0]) {
+        for (int card = 0; card < 2 && !status_path[0]; card++)
+            for (int c = 0; c < 4; c++) {
+                char p[160];
+                snprintf(p, sizeof p,
+                         "/sys/class/drm/card%d-HDMI-A-%d/status", card, c);
+                FILE *f = fopen(p, "r");
+                if (!f) continue;
+                char st[16] = {0};
+                if (fgets(st, sizeof st, f) && !strncmp(st, "connected", 9)) {
+                    snprintf(conn_dir, sizeof conn_dir,
+                             "/sys/class/drm/card%d-HDMI-A-%d", card, c);
+                    snprintf(status_path, sizeof status_path, "%.140s", p);
+                    snprintf(edid_path, sizeof edid_path,
+                             "%.128s/edid", conn_dir);
+                }
+                fclose(f);
+                if (status_path[0]) break;
+            }
+        if (!status_path[0]) return 0;
+    }
+    FILE *f = fopen(status_path, "r");
+    if (!f) return 0;
+    char st[16] = {0};
+    int up = fgets(st, sizeof st, f) && !strncmp(st, "connected", 9);
+    fclose(f);
+    if (up) {
+        FILE *e = fopen(edid_path, "rb");
+        if (e) {
+            size_t n = fread(sink_edid, 1, sizeof sink_edid, e);
+            fclose(e);
+            if (n >= 128) *edid_out = sink_edid;
+        }
+    }
+    return up;
+}
+
+static void link_watch(int force) {
+    static int last = -1;
+    uint8_t *edid;
+    int up = link_read_state(&edid);
+    if (up == last && !force) return;
+    last = up;
+    if (up) ddc_probe(conn_dir);
+    struct bridge_link l = { .up = up, .edid = up ? edid : NULL };
+    printf("bridge: link %s\n", up ? "up" : "down");
+    bridge_link_hook(&l);
 }
 
 /* ---------------------------------------------------------------- */
@@ -449,6 +586,9 @@ int main(int argc, char **argv) {
            WIDTH, HEIGHT, pay.pitch, hblank_nom, vblank_fix,
            t_row_s * 1e6, t_row_d * 1e6, margin_lines);
 
+    /* the module hears the initial link state before the first frame */
+    link_watch(1);
+
     /* --- the loop: DQBUF, header, genlock, QBUF -------------------- */
     /* WHERE the margin lives: the writer's line time is shorter than
      * the reader's, so its lead GROWS down the frame -- the minimum is
@@ -681,6 +821,8 @@ int main(int argc, char **argv) {
             .seq = seq, .phase_lines = lines_f,
             .locked = locked, .sensor_fd = sfd};
         bridge_frame_hook(&bf);
+        /* once a second: cheap, and a replug never waits long */
+        if ((seq & 31) == 0) link_watch(0);
     }
     if (n_stat)
         printf("bridge: SOAK VERDICT over %ld locked frames: BEAM "

@@ -24,7 +24,8 @@ CACHE = Path(os.environ.get("XDG_CACHE_HOME",
 
 
 def _sources() -> list[Path]:
-    files = sorted(CSRC.glob("*.c")) + sorted(CSRC.glob("modules/*.c"))
+    files = (sorted(CSRC.glob("*.c")) + sorted(CSRC.glob("modules/*.c"))
+             + sorted(CSRC.glob("modules/*/*.c")))
     files = sorted(CSRC.glob("*.h")) + files
     # editors and macOS both leave dot-droppings that match *.c
     return [f for f in files if not f.name.startswith(".")]

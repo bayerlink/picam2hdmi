@@ -13,6 +13,10 @@ SCPI. This daemon owns the scanout and listens for three things:
     PUT  /recordings/<name>   upload a recording (.npy of containers)
     GET  /recordings/<name>   download it back, byte-identical
     DELETE /recordings/<name> remove it
+    GET  /modules             the two module slots' manifests
+    PUT  /modules/<slot>      upload a package (tar.gz): isp or sensor;
+                              validated, compiled in, bridge restarted
+    DELETE /modules/<slot>    remove it and rebuild plain
     PUT  /power               {"off": true} -> clean shutdown; instruments
                               have power buttons, and SD cards prefer them
 
@@ -638,6 +642,9 @@ def _handler(supervisor: Supervisor):
                         if camera["index"] == supervisor.camera_index():
                             camera["modes"] = [list(m) for m in modes]
                 return self._send(200, {"cameras": cameras})
+            if self.path == "/modules":
+                from . import modules_mgr
+                return self._send(200, modules_mgr.status())
             if self.path == "/recordings":
                 return self._send(200, {"recordings":
                                         supervisor.status()["spool"]})
@@ -714,6 +721,14 @@ def _handler(supervisor: Supervisor):
             self._send(404, {"error": "unknown path"})
 
         def do_DELETE(self):
+            if self.path.startswith("/modules/"):
+                from . import modules_mgr
+                try:
+                    result = modules_mgr.remove(
+                        self.path[len("/modules/"):])
+                except ValueError as error:
+                    return self._send(400, {"error": str(error)})
+                return self._send(200, result)
             if self.path.startswith("/recordings/"):
                 path = self._spool_name(self.path[len("/recordings/"):])
                 if path is None:
@@ -755,6 +770,18 @@ def _handler(supervisor: Supervisor):
                     return self._send(400, {
                         "error": f"{type(error).__name__}: {error}"})
                 return self._send(200, supervisor.status())
+            if self.path.startswith("/modules/"):
+                from . import modules_mgr
+                slot = self.path[len("/modules/"):]
+                try:
+                    result = modules_mgr.install(slot,
+                                                 self.rfile.read(length))
+                except ValueError as error:
+                    return self._send(400, {"error": str(error)})
+                except Exception as error:  # noqa: BLE001 -- the compile log
+                    return self._send(400, {
+                        "error": f"{type(error).__name__}: {error}"})
+                return self._send(200, result)
             if self.path.startswith("/recordings/"):
                 name = self.path[len("/recordings/"):]
                 path = self._spool_name(name)

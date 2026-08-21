@@ -44,7 +44,7 @@ Issues = "https://github.com/bayerlink/picam2hdmi/issues"
 # on (picam2hdmi/native.py) -- the binary is a function of bridge.c
 # plus the modules present, so a prebuilt one would be a lie waiting
 # for its first module.
-picam2hdmi = ["csrc/*", "csrc/modules/*"]
+picam2hdmi = ["csrc/*", "csrc/modules/*", "csrc/modules/*/*", "ui.html"]
 
 [project.scripts]
 picam2hdmi = "picam2hdmi.cli:main"
@@ -55,5 +55,4 @@ include = ["picam2hdmi*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-[tool.setuptools.package-data]
-picam2hdmi = ["ui.html"]
+

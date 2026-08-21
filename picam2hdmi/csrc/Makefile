@@ -6,7 +6,7 @@
 # agree -- the bayerlink header.
 CFLAGS ?= -O2 -Wall -Wextra $(shell pkg-config --cflags libdrm)
 LDLIBS ?= $(shell pkg-config --libs libdrm) -lm
-SRC = $(wildcard *.c) $(wildcard modules/*.c)
+SRC = $(wildcard *.c) $(wildcard modules/*.c) $(wildcard modules/*/*.c)
 
 bridge: $(SRC) bridge.h
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)

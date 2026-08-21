@@ -30,4 +30,28 @@ struct bridge_frame {
 
 void bridge_frame_hook(const struct bridge_frame *f);
 
+/* The LINK hook: called once after start-up with the initial state,
+ * and again on every HDMI hot-plug edge. This is where a module
+ * reloads the far end -- the receiver forgets its registers when
+ * the cable or its power goes, and the sensor's owner is the one
+ * who knows what to write back. `edid` is the sink's EDID (256
+ * bytes) when the link is up and readable, else NULL; a module can
+ * recognise its far end there before touching a register. */
+struct bridge_link {
+    int up;
+    const uint8_t *edid;    /* 256 bytes, or NULL */
+};
+
+void bridge_link_hook(const struct bridge_link *l);
+
+/* The far-end register channel: the display cable's own I2C bus,
+ * reaching the receiver's register personality (16-bit register
+ * address, 32-bit big-endian value, auto-increment -- the wire
+ * protocol of the receiver's ddc engine). The bridge owns bus
+ * discovery; a module just reads and writes. Both return 0 on
+ * success, -1 with errno on a bus that is absent or not answering
+ * -- which a module must expect: cables are cables. */
+int bridge_ddc_write(uint16_t reg, uint32_t value);
+int bridge_ddc_read(uint16_t reg, uint32_t *value);
+
 #endif
