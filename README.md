@@ -46,6 +46,8 @@ print(header.bayer_order, header.width, header.height, header.frame_seq)
 | KMS scanout (double-buffered, full-range RGB forced) | **working** — pure ctypes DRM, proven on the bench |
 | Picamera2 raw capture | **working** — the sensor's packed bytes ride to the wire verbatim; crop, fixed exposure/gain, every libcamera camera unseen |
 | Instrument mode | **working** — `picam2hdmi serve`: HTTP control, recordings spool, a control panel with a live viewfinder crop editor and a power button; the last source is restored at boot (`contrib/picam2hdmi.service`) |
+| Genlocked bridge | **working** — `picam2hdmi bridge`: the C daemon, sensor lines onto the wire in lines, output phase-locked to the sensor so latency is lines and no frame is shown twice or dropped (`contrib/bridge.service`) |
+| Module slots | **working** — C packages uploaded from the panel and compiled into the bridge: `isp` (policy: the bridge hooks and the far end's registers), `sensor` (a driver), `algo` (pure computation) |
 
 ## Usage
 
@@ -77,6 +79,34 @@ The short of it:
 sudo picam2hdmi stream --source camera --exposure-us 30000 --gain 4.0
 sudo picam2hdmi serve                  # instrument: panel + HTTP on :8080
 ```
+
+## Modules: someone else's algorithm, running on this Pi
+
+The bridge is generic and stays that way — it knows frames, links and
+cables, and nothing about what a picture *means*. What gives it meaning
+is a **module**: a flat tar of C and a manifest, uploaded from the panel,
+compiled into the bridge on the device, and rejected outright if it does
+not build. Three slots, one per responsibility, so a package is only ever
+replaced by another of its own kind:
+
+| slot | what belongs there |
+| --- | --- |
+| `isp` | a use-case's policy: owns the bridge hooks and every write to the far end's registers |
+| `sensor` | a driver: writes its own sensor's controls, carries the sensor's facts as data |
+| `algo` | pure computation, reaching hardware only through what the policy package lends it |
+
+The seam is four weak symbols in [`csrc/bridge.h`](picam2hdmi/csrc/bridge.h):
+per-frame, on every HDMI hot-plug edge (with the sink's EDID, so a module
+can recognise its far end before touching it), the cable's own register
+channel, and one text command from the panel. Packages declare what they
+provide and require; the set is checked at upload, so a mismatch is an
+HTTP 400 rather than a compile error at three in the morning.
+
+A first-class use of this is an ISP on the far end of the cable:
+[revela](https://github.com/lanserge/revela) generates both packages —
+policy and sensor — and its ISP package carries its register map, which
+the panel turns into widgets. That path is the reference, not a
+requirement: the slots take anyone's C.
 
 ## The one integration rule
 
