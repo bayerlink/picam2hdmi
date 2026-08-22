@@ -629,8 +629,13 @@ def _bridge_service(action: str) -> bool:
     have to know there are two daemons."""
     import subprocess
 
-    return subprocess.run(["systemctl", action, "bridge"],
-                          check=False).returncode == 0
+    try:
+        return subprocess.run(["systemctl", action, "bridge"],
+                              check=False).returncode == 0
+    except OSError:
+        # No systemd, or no bridge unit: this daemon is the only engine
+        # here, which is the ordinary case on a development machine.
+        return False
 
 
 def _bridge_running() -> bool:
@@ -977,14 +982,17 @@ def _handler(supervisor: Supervisor):
                     # Somebody choosing a source should not have to know
                     # any of that.
                     wanted = spec.get("source", "off")
-                    if wanted == "camera":
+                    if wanted == "camera" and (
+                            _bridge_running() or _bridge_service("start")):
+                        # A bridge exists and it owns live camera: hand
+                        # the bench over. Where there is no bridge --  a
+                        # development box -- this daemon stays the camera
+                        # engine and nothing below changes.
                         supervisor.stop()
-                        if not _bridge_running():
-                            _bridge_service("start")
                         supervisor._persist_intent(spec)
                         return self._send(200, supervisor.status())
-                    # everything else needs the display, so the bridge
-                    # hands it back first
+                    # everything else needs the display, so a running
+                    # bridge hands it back first
                     if _bridge_running():
                         _bridge_service("stop")
                     if wanted == "off":
