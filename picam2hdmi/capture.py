@@ -19,7 +19,7 @@ honest: x and width must be multiples of the group (4 samples at 10
 bits), y and height even so the CFA phase survives. The crop is how a
 big sensor meets a link budget: a 2592-wide mode does not obey 1080p's
 2200-slot rate rule, a cropped window does -- and a *small* crop fits
-the luma tunnel, which is how real photons get byte-verified through a
+the capture path, which is how real photons get byte-verified through a
 $10 capture stick.
 """
 from __future__ import annotations
@@ -106,7 +106,7 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
            crop: tuple[int, int, int, int] | None = None,
            exposure_us: int | None = None,
            analogue_gain: float | None = None,
-           luma_tunnel: bool = False, flags: int = 0, peek=None,
+           flags: int = 0, peek=None,
            crop_ref=None, source_id: int | None = None):
     """An endless container source from the camera. Runs on the Pi.
 
@@ -116,8 +116,8 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     1080p's rate rule); ``crop`` selects a window of it.
 
     ``peek``, if given, receives every emitted container BEFORE
-    any tunnel wrap -- the content, so a control surface can show what
-    the crop is selecting even when the wire carries the tunnel's grey.
+    the content, so a control surface can show what the crop is
+    selecting.
     It never touches the wire path.
 
     ``source_id`` stamps the header's camera field. Left None it is
@@ -145,7 +145,6 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
             f"python3-picamera2), which is Pi-only: {error}") from None
 
     from bayerlink import encode_packed
-    from bayerlink import tunnel as _tunnel
     from bayerlink.protocol import _GROUP
 
     try:
@@ -199,7 +198,7 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     else:
         x, y, w, h = 0, 0, sensor_w, sensor_h
 
-    target = _tunnel.inner_display(*display) if luma_tunnel else display
+    target = display
     check_rate(w, display)
     if crop_ref is not None:
         crop_ref.update(sensor=(sensor_w, sensor_h), bits=bits, order=order,
@@ -249,8 +248,7 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
             if peek is not None:
                 peek(container)
                 shown = (x, y, w, h)
-            yield _tunnel.encode(container, display) if luma_tunnel \
-                else container
+            yield container
             sequence += 1
     finally:
         # The camera is exclusive hardware; release it the moment this

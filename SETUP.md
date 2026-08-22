@@ -116,7 +116,7 @@ pulled plugs); switching power back on brings everything back.
   the display. Use OS Lite, or stop the display manager.
 - **Near-black camera frames** — AE is off by design; set
   `--exposure-us` / `--gain` (see step 3).
-- **Refusals** (geometry, rate rule, tunnel budget) — the message names
+- **Refusals** (geometry, rate rule) — the message names
   the limit and the fix; they are the tool working, not failing.
 - **Capture stick shows a frozen frame** after the source switches
   modes — the stick replays its last frame while re-locking; wait a

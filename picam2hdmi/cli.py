@@ -60,7 +60,7 @@ def main(argv=None) -> int:
     stream.add_argument("--crop", default=None,
                         help="sensor window x,y,w,h for --source camera -- "
                              "how a big sensor meets the link budget, and "
-                             "how a small window fits the luma tunnel")
+                             "how a small window fits the wire")
     stream.add_argument("--exposure-us", type=int, default=None,
                         help="fixed exposure for --source camera (AE is "
                              "off by default: a raw source is deterministic)")
@@ -68,10 +68,6 @@ def main(argv=None) -> int:
                         help="fixed analogue gain for --source camera")
     stream.add_argument("--connector", type=int, default=None)
     stream.add_argument("--card", default=None, help="/dev/dri/cardN override")
-    stream.add_argument("--luma-tunnel", action="store_true",
-                        help="wrap the container in bayerlink's luma tunnel, "
-                             "for Y-only capture paths (cheap YUY2 dongles); "
-                             "pick a small --width/--height, capacity is 1/40")
 
     bridge = sub.add_parser(
         "bridge",
@@ -193,18 +189,15 @@ def main(argv=None) -> int:
             frames = capture.frames(display, mode=cam_mode, crop=crop,
                                     exposure_us=args.exposure_us,
                                     analogue_gain=args.gain,
-                                    luma_tunnel=args.luma_tunnel,
                                     source_id=args.source_id)
         elif args.source == "file":
             if not args.file:
                 parser.error("--source file needs --file <recording.npy>")
             frames = output.file_frames(args.file, display,
-                                        luma_tunnel=args.luma_tunnel,
                                         restamp=not args.no_restamp)
         else:
             frames = output.pattern_frames(args.pattern, args.width,
-                                           args.height, args.bayer, display,
-                                           luma_tunnel=args.luma_tunnel)
+                                           args.height, args.bayer, display)
         try:
             output.stream(frames, mode=want, connector=args.connector,
                           card_path=args.card,

@@ -162,7 +162,7 @@ def test_crop_only_change_retargets_the_running_camera(instrument):
                               "order": "GBRG", "display": (64, 16),
                               "target": (64, 16), "crop": (0, 0, 64, 12)}
     spec = {"source": "camera", "cam_mode": [64, 48], "exposure_us": 1000,
-            "gain": 2.0, "luma_tunnel": False, "mode": "64x16@30"}
+            "gain": 2.0, "mode": "64x16@30"}
     supervisor.spec = dict(spec)
 
     # Only the window differs: retargeted live, same thread, no restart.

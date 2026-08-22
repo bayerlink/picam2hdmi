@@ -114,8 +114,7 @@ def _stream(card, frames, mode, connector, on_frame,
 
 
 def pattern_frames(mode_name: str, cam_width: int, cam_height: int,
-                   bayer: str, display: tuple[int, int],
-                   luma_tunnel: bool = False):
+                   bayer: str, display: tuple[int, int]):
     """An endless container source from one test pattern.
 
     The payload is encoded ONCE; each frame only re-stamps the header's
@@ -123,28 +122,9 @@ def pattern_frames(mode_name: str, cam_width: int, cam_height: int,
     the receiving side by the same published package, and cheap enough that
     the loop is all flips.
 
-    ``luma_tunnel`` wraps the container in bayerlink's experimental luma
-    tunnel: nibbles as grey levels plus a pilot line, so a Y-only capture
-    path (a cheap YUY2 dongle) still recovers the bytes exactly. The
-    container underneath is unchanged -- it is encoded for the tunnel's
-    smaller virtual display, and the receiver hands the recovered container
-    to the same decode_frame() as ever. Costs 40x capacity; a conformance
-    bench does not care.
     """
     from bayerlink import encode_frame, pattern
     from bayerlink.protocol import FLAG_TEST_PATTERN
-
-    if luma_tunnel:
-        from bayerlink import tunnel
-        inner = tunnel.inner_display(*display)
-        raw = pattern.generate(mode_name, cam_width, cam_height)
-        container = encode_frame(raw, bayer, frame_seq=0, display=inner,
-                                 flags=FLAG_TEST_PATTERN)
-        sequence = 0
-        while True:
-            patch_frame_seq(container, sequence)
-            yield tunnel.encode(container, display)
-            sequence += 1
 
     raw = pattern.generate(mode_name, cam_width, cam_height)
     container = encode_frame(raw, bayer, frame_seq=0, display=display,
@@ -156,8 +136,7 @@ def pattern_frames(mode_name: str, cam_width: int, cam_height: int,
         sequence += 1
 
 
-def file_frames(path, display: tuple[int, int], luma_tunnel: bool = False,
-                restamp: bool = True):
+def file_frames(path, display: tuple[int, int], restamp: bool = True):
     """An endless container source from a RECORDING -- replay as scanout.
 
     ``path`` is a .npy of containers: one (h, w, 3) frame or a stack
@@ -183,15 +162,7 @@ def file_frames(path, display: tuple[int, int], luma_tunnel: bool = False,
             f"{path}: expected containers (h, w, 3) or a stack "
             f"(n, h, w, 3), got {stack.shape}")
 
-    if luma_tunnel:
-        from bayerlink import tunnel
-        inner = tunnel.inner_display(*display)
-        if stack.shape[2] != inner[0]:
-            raise ValueError(
-                f"{path}: containers are {stack.shape[2]} wide but the "
-                f"{display} tunnel carries {inner[0]}; record and replay "
-                "must agree on the tunnel geometry")
-    elif (stack.shape[2], ) != (display[0], ):
+    if (stack.shape[2], ) != (display[0], ):
         raise ValueError(
             f"{path}: containers are {stack.shape[2]} wide but the display "
             f"is {display[0]}; a container IS its display's memory image")
@@ -202,9 +173,5 @@ def file_frames(path, display: tuple[int, int], luma_tunnel: bool = False,
             container = np.array(frame)          # writable copy off the mmap
             if restamp:
                 patch_frame_seq(container, sequence)
-            if luma_tunnel:
-                from bayerlink import tunnel
-                yield tunnel.encode(container, display)
-            else:
-                yield container
+            yield container
             sequence += 1

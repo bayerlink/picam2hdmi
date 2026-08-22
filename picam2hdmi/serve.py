@@ -7,7 +7,7 @@ SCPI. This daemon owns the scanout and listens for three things:
     GET  /status              what is streaming, and how it is going
     PUT  /source              switch source: pattern, a recording, or off
     GET  /preview.png         what is being EMITTED, as an image (for a
-                              tunnel source, the inner content) -- add
+
                               ?recording=<name> to look inside the spool
     GET  /recordings          list the spool
     PUT  /recordings/<name>   upload a recording (.npy of containers)
@@ -277,13 +277,12 @@ class Supervisor:
         source = spec.get("source")
         mode = _parse_mode(mode_text)
         display = (mode[0], mode[1])
-        tunnel = bool(spec.get("luma_tunnel", False))
         crop_ref = None                   # camera only; filled on startup
         if source == "pattern":
             frames = output.pattern_frames(
                 spec.get("pattern", "counting"),
                 int(spec.get("width", 512)), int(spec.get("height", 240)),
-                spec.get("bayer", "RGGB"), display, luma_tunnel=tunnel)
+                spec.get("bayer", "RGGB"), display)
             # Prove the spec by building its first frame NOW; the
             # generator defers everything, and a refusal belongs in the
             # HTTP response, not in the thread's obituary.
@@ -300,7 +299,6 @@ class Supervisor:
                 raise ValueError(f"no recording {name!r}; the spool has "
                                  f"{self.status()['spool']}")
             frames = output.file_frames(str(path), display,
-                                        luma_tunnel=tunnel,
                                         restamp=bool(spec.get("restamp",
                                                               True)))
             first = next(frames)
@@ -328,9 +326,8 @@ class Supervisor:
             supervisor = self
 
             # A camera moves; its preview should too. The capture path
-            # peeks every 5th container BEFORE the tunnel wrap, so the
-            # panel's poll shows the moving window even when the wire
-            # carries the tunnel's grey.
+            # peeks every 5th container, so the panel's poll shows the
+            # moving window.
             def _stash(container):
                 supervisor.preview_container = container
 
@@ -340,8 +337,7 @@ class Supervisor:
                 mode=tuple(int(v) for v in cam_mode) if cam_mode else None,
                 crop=tuple(int(v) for v in crop) if crop else None,
                 exposure_us=spec.get("exposure_us"),
-                analogue_gain=spec.get("gain"),
-                luma_tunnel=tunnel, peek=_stash, crop_ref=crop_ref,
+                analogue_gain=spec.get("gain"), peek=_stash, crop_ref=crop_ref,
                 source_id=spec.get("source_id"))
             first = next(frames)          # frame 0 peeked during this pull
             preview = self.preview_container
@@ -349,18 +345,6 @@ class Supervisor:
         else:
             raise ValueError(f"source {source!r} is not one of "
                              "'pattern', 'file', 'camera', 'off'")
-
-        # For a tunnel source the scanout frame is the grey wrap; the
-        # preview shows the CONTENT -- the inner container -- because an
-        # instrument answers "what am I emitting", not "what shade of grey".
-        if tunnel and source == "pattern":
-            from bayerlink import tunnel as _tunnel
-            inner = _tunnel.inner_display(*display)
-            preview_frames = output.pattern_frames(
-                spec.get("pattern", "counting"),
-                int(spec.get("width", 512)), int(spec.get("height", 240)),
-                spec.get("bayer", "RGGB"), inner)
-            preview = next(preview_frames)
 
         self.stop()
         self.preview_container = preview
@@ -477,9 +461,7 @@ class Supervisor:
         return (spec.get("container") == old.get("container")
                 and spec.get("mode") == old.get("mode")
                 and norm(spec.get("cam_mode")) == norm(old.get("cam_mode"))
-                and spec.get("flags") == old.get("flags")
-                and bool(spec.get("luma_tunnel"))
-                == bool(old.get("luma_tunnel")))
+                and spec.get("flags") == old.get("flags"))
 
     def _live_crop(self, spec: dict, mode_text: str) -> None:
         """Retarget the running camera's window; refusals stay identical.

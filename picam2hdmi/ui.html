@@ -143,8 +143,6 @@
       onchange="applyFromFields()"></label>
     <label>gain <input id="cgain" type="number" step="0.1" value="4.0"
       onchange="applyFromFields()"></label>
-    <label><input id="ctun" type="checkbox"
-      onchange="drawCrop(); applyFromFields()"> luma tunnel</label>
 
     <div id="croparea">
       <div id="wirewin"><img id="wireimg" alt=""></div>
@@ -259,7 +257,7 @@ function showCards() {
  * nothing says why. */
 function cameraControlsFor(owner) {
   const fixed = owner === 'bridge';
-  for (const id of ['cmode', 'cexp', 'cgain', 'ctun'])
+  for (const id of ['cmode', 'cexp', 'cgain'])
     if ($(id)) $(id).disabled = fixed;
   const note = $('camfixed');
   if (!note) return;
@@ -340,7 +338,7 @@ function setSource(spec) {
 /* ---------------- crop editor ------------------------------------------- */
 /* The snap rules ARE the packing rules: x and w land on 4-sample group
    boundaries, y and h stay even for the CFA. The budget line applies the
-   1080p rate rule (2200 slots) and the tunnel byte budget live, so the
+   1080p rate rule (2200 slots) lives, so the
    refusal the server would send is visible before the request exists. */
 
 let sensor = {w: 1296, h: 972};
@@ -354,7 +352,7 @@ const effective = () => useSelection ? crop
 const coversSensor = r => r.x === 0 && r.y === 0 &&
                           r.w === sensor.w && r.h === sensor.h;
 const GX = 4, GY = 2, MINW = 16, MINH = 16;
-const SLOTS = 2200, TUNNEL_LINE_BYTES = 144 - 10;  // inner bytes, minus slack
+const SLOTS = 2200;
 
 function modeChanged() {
   const [w, h] = $('cmode').value.split('x').map(Number);
@@ -396,7 +394,6 @@ function seedCameraFields(src) {
   }
   if (src.exposure_us != null) $('cexp').value = src.exposure_us;
   if (src.gain != null) $('cgain').value = src.gain;
-  $('ctun').checked = !!src.luma_tunnel;
 }
 
 function applyFromFields() {
@@ -466,18 +463,11 @@ function drawCrop() {
     : `full frame <b>${sensor.w}×${sensor.h}</b>`) +
     ` — sensor ${sensor.w}×${sensor.h}` +
     (useSelection && wire && !applied ? ' — applies on release' : '');
-  const tunnel = $('ctun').checked;
-  const lineBytes = Math.ceil(win.w * 5 / 4);
-  let msg, ok;
-  if (tunnel) {
-    ok = lineBytes <= TUNNEL_LINE_BYTES;
-    msg = ok ? `fits the luma tunnel (${lineBytes} of ${TUNNEL_LINE_BYTES} bytes/line)`
-             : `too wide for the tunnel: ${lineBytes} bytes/line > ${TUNNEL_LINE_BYTES} — narrow the crop`;
-  } else {
-    ok = win.w <= SLOTS;
-    msg = ok ? `within the 1080p rate budget (${win.w} of ${SLOTS} slots)`
-             : `exceeds the 1080p rate budget: ${win.w} > ${SLOTS} slots — narrow the crop`;
-  }
+
+  const ok = win.w <= SLOTS;
+  const msg = ok
+    ? `within the 1080p rate budget (${win.w} of ${SLOTS} slots)`
+    : `exceeds the 1080p rate budget: ${win.w} > ${SLOTS} slots — narrow the crop`;
   const budget = $('budget');
   budget.textContent = msg;
   budget.className = ok ? 'ok' : 'bad';
@@ -521,8 +511,7 @@ $('croparea').addEventListener('pointermove', e => {
   } else {
     // The width budget constrains the DRAG, not just the request: a box
     // wider than the link carries would make every release a refusal.
-    const maxW = Math.floor(($('ctun').checked
-      ? TUNNEL_LINE_BYTES * 4 / 5 : SLOTS) / GX) * GX;
+    const maxW = Math.floor(SLOTS / GX) * GX;
     if (m.includes('e')) w = snapX(clamp(s.w + dx, MINW,
                                          Math.min(maxW, sensor.w - s.x)));
     if (m.includes('s')) h = snapY(clamp(s.h + dy, MINH, sensor.h - s.y));
@@ -560,7 +549,7 @@ function applyCamera() {
              ? {...wireSpec} : {};
   const spec = Object.assign(base, {source: 'camera',
     cam_mode: $('cmode').value.split('x').map(Number),
-    luma_tunnel: $('ctun').checked});
+});
   if (useSelection) spec.crop = [crop.x, crop.y, crop.w, crop.h];
   else delete spec.crop;
   if ($('cexp').value !== '') spec.exposure_us = +$('cexp').value;
@@ -650,7 +639,6 @@ async function refresh() {
       `${src.file ? ' ' + src.file : ''}` +
       `${src.width ? ' ' + src.width + 'x' + src.height : ''}` +
       `${src.crop ? ' crop ' + src.crop[2] + 'x' + src.crop[3] : ''}` +
-      `${src.luma_tunnel ? ' (tunnel)' : ''}` +
       `${src.mode ? ' @ ' + src.mode : ''}` +
       `${s.display === false ? ' — no display, monitoring' : ''}` : 'idle') +
     ` · ${s.frames} frames · ${Math.round(s.uptime_s)}s`;
