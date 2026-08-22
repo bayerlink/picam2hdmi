@@ -638,6 +638,65 @@ def _bridge_service(action: str) -> bool:
         return False
 
 
+CLIP_PATH = "/run/bridge-clip.raw"
+
+
+def _prepare_clip(path: Path) -> int:
+    """Normalise a recording into payload rows the bridge can play.
+
+    Recordings come in both shapes -- with the header row and without,
+    single frame and stacked -- so the normalising happens HERE, where
+    numpy already is. The bridge receives tightly packed payload rows
+    and keeps writing the bayerlink header itself, so a clip can never
+    carry a stale header into the link.
+    """
+    import numpy as np
+
+    stack = np.load(path, mmap_mode="r")
+    if stack.ndim == 3:
+        stack = stack[None]
+    if stack.ndim != 4 or stack.shape[-1] != 3:
+        raise ValueError(f"{path.name}: expected (frames, lines, samples, 3), "
+                         f"got {stack.shape}")
+    frames, lines, width, _ = stack.shape
+    if width != 1920 or lines not in (1080, 1081):
+        raise ValueError(f"{path.name}: {width}x{lines} is not a 1920x1080 "
+                         "payload (with or without the header row); the "
+                         "bridge's raster is fixed at build time")
+    with open(CLIP_PATH + ".new", "wb") as out:
+        for i in range(frames):
+            frame = np.asarray(stack[i])
+            out.write(np.ascontiguousarray(
+                frame[1:] if lines == 1081 else frame).tobytes())
+    Path(CLIP_PATH + ".new").rename(CLIP_PATH)
+    return frames
+
+
+def _bridge_up(attempts: int = 40) -> bool:
+    """Start the bridge if needed and wait for it to answer.
+
+    Starting is asynchronous -- systemd returns long before the daemon
+    has built, opened the sensor and reached its loop -- so a command
+    issued straight after start gets ECONNREFUSED. Bounded on purpose:
+    a bridge that has not answered in twenty seconds is not coming, and
+    a wait without a limit outlives the bench that is waiting on it.
+    """
+    import time
+
+    if _bridge_running():
+        return True
+    if not _bridge_service("start"):
+        # No systemd, or no bridge unit: there is nothing to wait for,
+        # and waiting anyway would hang every request on a machine that
+        # simply does not have one.
+        return False
+    for _ in range(attempts):
+        time.sleep(0.5)
+        if _bridge_running():
+            return True
+    return False
+
+
 def _bridge_running() -> bool:
     """Whether the genlocked bridge is the one driving the bench.
 
@@ -982,17 +1041,40 @@ def _handler(supervisor: Supervisor):
                     # Somebody choosing a source should not have to know
                     # any of that.
                     wanted = spec.get("source", "off")
-                    if wanted == "camera" and (
-                            _bridge_running() or _bridge_service("start")):
+                    if wanted == "camera" and _bridge_up():
                         # A bridge exists and it owns live camera: hand
                         # the bench over. Where there is no bridge --  a
                         # development box -- this daemon stays the camera
                         # engine and nothing below changes.
                         supervisor.stop()
+                        _bridge_command("bridge source sensor")
                         supervisor._persist_intent(spec)
                         return self._send(200, supervisor.status())
-                    # everything else needs the display, so a running
-                    # bridge hands it back first
+                    if wanted == "file" and spec.get("file") and _bridge_up():
+                        # ONE engine: the bridge draws the clip into the
+                        # same buffer the sensor would have written, so
+                        # the raster, the header and the lock are the
+                        # ones already running. This daemon never takes
+                        # the display.
+                        clip = self._spool_name(spec["file"])
+                        if clip is None or not clip.exists():
+                            return self._send(404, {
+                                "error": f"no recording {spec['file']!r}"})
+                        try:
+                            n = _prepare_clip(clip)
+                        except ValueError as error:
+                            return self._send(400, {"error": str(error)})
+                        r = _bridge_command(f"bridge source clip {CLIP_PATH}")
+                        if not r.startswith("ok"):
+                            return self._send(400, {"error": r})
+                        supervisor._persist_intent(spec)
+                        status = supervisor.status()
+                        status["playing"] = {"file": spec["file"],
+                                             "frames": n, "by": "bridge"}
+                        return self._send(200, status)
+                    # Whatever is left -- patterns, and anything at all
+                    # on a machine with no bridge -- this daemon serves,
+                    # so a running bridge hands the display back first.
                     if _bridge_running():
                         _bridge_service("stop")
                     if wanted == "off":

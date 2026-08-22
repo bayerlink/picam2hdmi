@@ -294,6 +294,13 @@ static int read_ctrl(int fd, uint32_t id, int32_t *out) {
  * lands in the displayed buffer already in phase. Stopping the camera
  * instead would drop the lock and pay for it on every unpause. */
 static int paused;
+/* ONE engine: the display is driven from the sensor or from a clip in
+ * memory, never from a second process. A clip is payload rows only,
+ * tightly packed -- the bridge keeps writing the bayerlink header
+ * itself, so a recording cannot carry a stale one. */
+static uint8_t *clip_map;
+static size_t clip_bytes, clip_frame_bytes, clip_frames, clip_at;
+static int clip_drawn;
 static int scratch_fd = -1;
 static uint8_t *scratch_map;
 static uint32_t scratch_pitch;
@@ -319,13 +326,59 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
             read_ctrl(bstate.sensor_fd, V4L2_CID_ANALOGUE_GAIN, &gain);
         }
         snprintf(reply, cap,
-                 "ok seq=%u locked=%d paused=%d phase=%.2f margin=%.0f "
+                 "ok seq=%u locked=%d paused=%d source=%s "
+                 "phase=%.2f margin=%.0f "
                  "vblank=%d uptime=%ld exposure=%d gain=%d",
-                 bstate.seq, bstate.locked, paused, bstate.phase,
+                 bstate.seq, bstate.locked, paused,
+                 clip_map ? "clip" : "sensor", bstate.phase,
                  bstate.margin,
                  bstate.vblank,
                  bstate.started ? (long)(time(NULL) - bstate.started) : 0L,
                  exposure, gain);
+        return;
+    }
+    if (!strncmp(cmd, "source ", 7)) {
+        const char *what = cmd + 7;
+        if (!strcmp(what, "sensor")) {
+            if (clip_map) { munmap(clip_map, clip_bytes); clip_map = NULL; }
+            clip_drawn = 0;
+            snprintf(reply, cap, "ok the sensor drives the display");
+            return;
+        }
+        char path[160];
+        if (sscanf(what, "clip %159s", path) == 1) {
+            int fd = open(path, O_RDONLY);
+            struct stat st;
+            if (fd < 0 || fstat(fd, &st) < 0) {
+                snprintf(reply, cap, "err %s: %s", path, strerror(errno));
+                if (fd >= 0) close(fd);
+                return;
+            }
+            size_t frame = (size_t)WIDTH * HEIGHT * 3;
+            if ((size_t)st.st_size < frame) {
+                snprintf(reply, cap, "err %s: %lld bytes is less than one "
+                         "%ux%u frame", path, (long long)st.st_size,
+                         WIDTH, HEIGHT);
+                close(fd);
+                return;
+            }
+            uint8_t *m = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+            close(fd);
+            if (m == MAP_FAILED) {
+                snprintf(reply, cap, "err %s: %s", path, strerror(errno));
+                return;
+            }
+            if (clip_map) munmap(clip_map, clip_bytes);
+            clip_map = m;
+            clip_bytes = st.st_size;
+            clip_frame_bytes = frame;
+            clip_frames = st.st_size / frame;
+            clip_at = 0;
+            clip_drawn = 0;
+            snprintf(reply, cap, "ok %zu frame(s) from %s", clip_frames, path);
+            return;
+        }
+        snprintf(reply, cap, "err source takes: sensor, clip <path>");
         return;
     }
     if (!strcmp(cmd, "preview")) {
@@ -867,7 +920,20 @@ int main(int argc, char **argv) {
          * scratch one while paused. Both slots may carry either fd --
          * V4L2 takes the dma-buf at queue time, so a pause is one
          * assignment and never a STREAMOFF. */
-        dq.m.fd = (paused && scratch_fd >= 0) ? scratch_fd : dmabuf;
+        const int sensor_shown = !paused && !clip_map;
+        dq.m.fd = (!sensor_shown && scratch_fd >= 0) ? scratch_fd : dmabuf;
+        /* A clip is drawn into the same buffer the sensor would have
+         * written, so everything downstream -- the header, the raster,
+         * the genlock -- is unchanged. A still is copied once: there is
+         * no reason to move six megabytes a frame to show one picture. */
+        if (clip_map && (clip_frames > 1 || !clip_drawn)) {
+            const uint8_t *src = clip_map + clip_at * clip_frame_bytes;
+            for (uint32_t r = 0; r < HEIGHT; r++)
+                memcpy(pay.map + (size_t)r * pay.pitch,
+                       src + (size_t)r * WIDTH * 3, WIDTH * 3);
+            clip_at = (clip_at + 1) % clip_frames;
+            clip_drawn = 1;
+        }
         if (ioctl(vfd, VIDIOC_QBUF, &dq) < 0) { perror("QBUF"); break; }
 
         /* PHASE: sensor frame-end against the last display vblank,
