@@ -148,7 +148,22 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     from bayerlink import tunnel as _tunnel
     from bayerlink.protocol import _GROUP
 
-    picam2 = Picamera2()
+    try:
+        picam2 = Picamera2()
+    except Exception as error:                # noqa: BLE001 -- re-raised
+        # libcamera refuses an already-acquired camera with "Camera
+        # __init__ sequence did not complete", which describes its own
+        # internals rather than the situation: something else is
+        # streaming from this sensor. On a bridge bench that something
+        # is the genlocked camera bridge, which holds both the sensor
+        # and the display.
+        raise RuntimeError(
+            "cannot open the camera -- another process is already "
+            "streaming from this sensor. Only one program may hold it "
+            "at a time; on a bridge bench that is the genlocked camera "
+            "bridge (systemctl stop bridge to take the camera, "
+            f"systemctl start bridge to give it back). libcamera said: "
+            f"{error}") from error
     size = tuple(mode) if mode else (1296, 972)
     controls = {"AeEnable": False, "AwbEnable": False}
     if exposure_us is not None:
