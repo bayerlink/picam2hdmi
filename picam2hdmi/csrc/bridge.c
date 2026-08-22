@@ -53,9 +53,19 @@
 #include <linux/v4l2-subdev.h>
 #include <linux/videodev2.h>
 
-#define WIDTH  1920
-#define HEIGHT 1080
-#define VDISP  (HEIGHT + 1)            /* + the header row            */
+/* The RASTER is the link's: what the sink advertises it can carry,
+ * and the size of everything that gets scanned out. The FRAME is the
+ * sensor's, discovered from the sensor at startup. They were one
+ * number for as long as this bridge only ever met one camera, and
+ * conflating them is why a different sensor, a crop or a mode change
+ * each had to be refused. A frame smaller than the raster simply sits
+ * inside it -- the header states the true width and height, and a
+ * receiver that takes its geometry from the stream crops correctly. */
+#define RASTER_W 1920
+#define RASTER_H 1080
+static uint32_t WIDTH  = RASTER_W;    /* the sensor's, until asked   */
+static uint32_t HEIGHT = RASTER_H;
+#define VDISP  (RASTER_H + 1)          /* + the header row            */
 #define BL_MAGIC  0x4B4C5942u          /* "BYLK"                      */
 
 /* The header's fourcc DECLARES the mosaic order. For ov5647 1080p
@@ -76,8 +86,27 @@ static const struct { const char *name; uint32_t fourcc; } ORDERS[] = {
     {"BGGR", 0x41414270u},             /* 'pBAA' */
     {"GRBG", 0x41416770u},             /* 'pgAA' */
 };
+static int order_given;                     /* --order beats discovery */
 static uint32_t bl_fourcc = 0x41414770u;    /* GBRG: the driver was
                                              * right; see above */
+/* The table above is the 10-bit family, which is what this link has
+ * ever carried. A sensor reporting another depth is not silently
+ * relabelled as ten -- the fourcc is the receiver's ONLY statement of
+ * how to unpack, so a wrong one is unreadable data that looks like a
+ * broken picture. */
+static uint32_t fourcc_for_order(const char *order, int bits) {
+    if (bits != 10) {
+        fprintf(stderr, "bridge: sensor is %d-bit; this build only stamps "
+                "the 10-bit fourccs, so the header would misdescribe the "
+                "payload. Keeping the compiled default.\n", bits);
+        return bl_fourcc;
+    }
+    for (unsigned i = 0; i < sizeof ORDERS / sizeof *ORDERS; i++)
+        if (!strcmp(ORDERS[i].name, order))
+            return ORDERS[i].fourcc;
+    return bl_fourcc;
+}
+
 /* source_id indexes the SOURCES on this device -- 0 here, because
  * there is one sensor. It is not an identity: two cameras of the same
  * model are two sources, and calibration reaches the receiver over the
@@ -89,9 +118,9 @@ static uint32_t bl_fourcc = 0x41414770u;    /* GBRG: the driver was
  * so a comment holds the pointer instead. */
 static drmModeModeInfo MODE = {
     .clock = 74250,
-    .hdisplay = WIDTH,  .hsync_start = 2008, .hsync_end = 2052,
+    .hdisplay = RASTER_W, .hsync_start = 2008, .hsync_end = 2052,
     .htotal = 2200,
-    .vdisplay = VDISP,  .vsync_start = 1084, .vsync_end = 1089,
+    .vdisplay = RASTER_H + 1, .vsync_start = 1084, .vsync_end = 1089,
     .vtotal = 1125,
     .vrefresh = 30,
     .flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC,
@@ -644,6 +673,46 @@ static void set_ctrl(int fd, uint32_t id, int32_t value, const char *name) {
     }
 }
 
+/* Ask the sensor what it is producing, instead of declaring it.
+ *
+ * One ioctl answers three questions that were three separate baked
+ * constants: the geometry, the mosaic order and the sample depth --
+ * the last two both encoded in the mediabus code. The order in
+ * particular was a guess that cost a bench day (a morning "proving"
+ * BGGR before GBRG rendered true), and a guess is exactly what a
+ * sensor never needs to be asked twice about.
+ *
+ * Returns 0 and leaves everything untouched if the subdev will not
+ * answer -- an older kernel, an unusual driver -- so a bridge that
+ * cannot ask still runs on the numbers it was built with. */
+static int discover_sensor(int sfd, uint32_t *w, uint32_t *h,
+                           const char **order, int *bits) {
+    struct v4l2_subdev_format f = {.which = V4L2_SUBDEV_FORMAT_ACTIVE,
+                                   .pad = 0};
+    if (ioctl(sfd, VIDIOC_SUBDEV_G_FMT, &f) < 0)
+        return 0;
+    static const struct { uint32_t code; const char *order; int bits; } CODES[] = {
+        {MEDIA_BUS_FMT_SRGGB8_1X8,  "RGGB",  8}, {MEDIA_BUS_FMT_SGRBG8_1X8,  "GRBG",  8},
+        {MEDIA_BUS_FMT_SGBRG8_1X8,  "GBRG",  8}, {MEDIA_BUS_FMT_SBGGR8_1X8,  "BGGR",  8},
+        {MEDIA_BUS_FMT_SRGGB10_1X10,"RGGB", 10}, {MEDIA_BUS_FMT_SGRBG10_1X10,"GRBG", 10},
+        {MEDIA_BUS_FMT_SGBRG10_1X10,"GBRG", 10}, {MEDIA_BUS_FMT_SBGGR10_1X10,"BGGR", 10},
+        {MEDIA_BUS_FMT_SRGGB12_1X12,"RGGB", 12}, {MEDIA_BUS_FMT_SGRBG12_1X12,"GRBG", 12},
+        {MEDIA_BUS_FMT_SGBRG12_1X12,"GBRG", 12}, {MEDIA_BUS_FMT_SBGGR12_1X12,"BGGR", 12},
+    };
+    for (unsigned i = 0; i < sizeof CODES / sizeof *CODES; i++)
+        if (CODES[i].code == f.format.code) {
+            *w = f.format.width;
+            *h = f.format.height;
+            *order = CODES[i].order;
+            *bits = CODES[i].bits;
+            return 1;
+        }
+    fprintf(stderr, "bridge: sensor reports mediabus code 0x%04x, which "
+            "this build does not know; keeping %ux%u\n",
+            f.format.code, *w, *h);
+    return 0;
+}
+
 static int64_t get_pixel_rate(int fd) {
     struct v4l2_ext_control c = {.id = V4L2_CID_PIXEL_RATE};
     struct v4l2_ext_controls cs = {
@@ -690,6 +759,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--margin")) margin_lines = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--test-pattern")) test_pattern = 1;
         else if (!strcmp(argv[i], "--order")) {
+            order_given = 1;
             const char *o = argv[++i]; size_t k;
             for (k = 0; k < 4 && strcmp(o, ORDERS[k].name); k++) ;
             if (k == 4) { fprintf(stderr, "unknown order %s\n", o); return 2; }
@@ -800,6 +870,36 @@ int main(int argc, char **argv) {
                    .code = MEDIA_BUS_FMT_SGBRG10_1X10,
                    .field = V4L2_FIELD_NONE}};
     if (ioctl(sfd, VIDIOC_SUBDEV_S_FMT, &sf) < 0) die("SUBDEV_S_FMT");
+
+    /* ...and now ASK, rather than assume it took what was offered.
+     * The answer settles the geometry, the mosaic order and the depth
+     * in one go -- three constants this file used to declare, and each
+     * of which has cost a bench day at least once when the declaration
+     * and the sensor disagreed. An explicit --order still wins, since
+     * an operator correcting a driver is the case that flag exists
+     * for. */
+    {
+        uint32_t dw = WIDTH, dh = HEIGHT;
+        const char *dorder = NULL;
+        int dbits = 0;
+        if (discover_sensor(sfd, &dw, &dh, &dorder, &dbits)) {
+            if (dw > RASTER_W || dh + 1 > VDISP) {
+                fprintf(stderr, "bridge: the sensor is sending %ux%u, which "
+                        "does not fit the %ux%u raster this link "
+                        "advertises. Choose a smaller sensor mode.\n",
+                        dw, dh, (unsigned)RASTER_W, (unsigned)VDISP);
+                return 1;
+            }
+            WIDTH = dw;
+            HEIGHT = dh;
+            if (!order_given)
+                bl_fourcc = fourcc_for_order(dorder, dbits);
+            printf("bridge: sensor says %ux%u %s %d-bit%s\n", WIDTH, HEIGHT,
+                   dorder, dbits,
+                   order_given ? " (order overridden on the command line)"
+                               : "");
+        }
+    }
 
     set_ctrl(sfd, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL, "ae");
     set_ctrl(sfd, V4L2_CID_AUTOGAIN, 0, "agc");

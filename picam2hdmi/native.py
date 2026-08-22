@@ -74,5 +74,5 @@ def check(binary: Path) -> bool:
                          capture_output=True, text=True).stdout.split()
     fc = fourcc_for("GBRG", 10)
     want = [Header(fourcc=fc, width=1920, height=1080, frame_seq=s,
-                   source_id=1).pack().hex() for s in (7, 0, 123456)]
+                   source_id=0).pack().hex() for s in (7, 0, 123456)]
     return got == want
