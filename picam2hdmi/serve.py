@@ -722,6 +722,26 @@ def _handler(supervisor: Supervisor):
                     except ValueError:
                         fields[key] = value
                 return self._send(200, fields)
+            if self.path == "/bridge/preview.png":
+                # What the SENSOR is writing, decimated by the bridge --
+                # the scratch buffer while paused, the displayed one
+                # otherwise. Raw Bayer sampled at constant CFA phase, so
+                # it is a grey frame: the source's view, not the ISP's.
+                import numpy as np
+                try:
+                    r = _bridge_command("bridge preview")
+                except OSError as error:
+                    return self._send(503, {
+                        "error": f"bridge control socket: {error}"})
+                if not r.startswith("ok "):
+                    return self._send(400, {"error": r})
+                path, width, height = r[3:].split()
+                raw = Path(path).read_bytes()
+                body = raw.split(b"\n", 3)[3]
+                img = np.frombuffer(body[:int(width) * int(height)],
+                                    dtype=np.uint8).reshape(int(height),
+                                                            int(width))
+                return self._send_bytes(200, _png_gray(img), "image/png")
             if self.path == "/isp/params":
                 regmap = _isp_regmap()
                 if regmap is None:
@@ -848,6 +868,16 @@ def _handler(supervisor: Supervisor):
                 if not r.startswith("ok"):
                     return self._send(400, {"error": r})
                 return self._send(200, {"set": key, "value": value})
+            if self.path in ("/bridge/pause", "/bridge/resume"):
+                verb = self.path.rsplit("/", 1)[1]
+                try:
+                    r = _bridge_command(f"bridge {verb}")
+                except OSError as error:
+                    return self._send(503, {
+                        "error": f"bridge control socket: {error}"})
+                if not r.startswith("ok"):
+                    return self._send(400, {"error": r})
+                return self._send(200, {verb: True, "detail": r[3:].strip()})
             if self.path == "/isp/commit":
                 try:
                     r = _bridge_command("commit")

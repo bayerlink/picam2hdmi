@@ -285,11 +285,26 @@ static int read_ctrl(int fd, uint32_t id, int32_t *out) {
 /* What the loop knows, published for the control socket. Written once
  * per frame by the loop and read between frames by the same thread, so
  * it needs no lock. */
+/* PAUSE holds the picture without stopping the camera. The display
+ * plane scans the payload buffer continuously and does not care
+ * whether anyone is writing it, so freezing is simply a matter of
+ * sending the sensor's DMA somewhere else -- a scratch buffer of the
+ * same size. The loop keeps getting frame-end events, so the genlock
+ * stays LOCKED throughout and resuming costs nothing: the next frame
+ * lands in the displayed buffer already in phase. Stopping the camera
+ * instead would drop the lock and pay for it on every unpause. */
+static int paused;
+static int scratch_fd = -1;
+static uint8_t *scratch_map;
+static uint32_t scratch_pitch;
+
 static struct {
     uint32_t seq;
     double phase, margin;
     int locked, vblank, sensor_fd;
     time_t started;
+    const uint8_t *payload_map;
+    uint32_t payload_pitch;
 } bstate = {.sensor_fd = -1};
 
 /* The bridge's own vocabulary. `status` is the loop's view of itself,
@@ -304,12 +319,63 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
             read_ctrl(bstate.sensor_fd, V4L2_CID_ANALOGUE_GAIN, &gain);
         }
         snprintf(reply, cap,
-                 "ok seq=%u locked=%d phase=%.2f margin=%.0f vblank=%d "
-                 "uptime=%ld exposure=%d gain=%d",
-                 bstate.seq, bstate.locked, bstate.phase, bstate.margin,
+                 "ok seq=%u locked=%d paused=%d phase=%.2f margin=%.0f "
+                 "vblank=%d uptime=%ld exposure=%d gain=%d",
+                 bstate.seq, bstate.locked, paused, bstate.phase,
+                 bstate.margin,
                  bstate.vblank,
                  bstate.started ? (long)(time(NULL) - bstate.started) : 0L,
                  exposure, gain);
+        return;
+    }
+    if (!strcmp(cmd, "preview")) {
+        /* A decimated grey thumbnail of what the SENSOR is currently
+         * writing -- the scratch buffer while paused, the displayed one
+         * otherwise. The payload is packed 10-bit Bayer (4 pixels in 5
+         * bytes, the four MSBs first), so byte p*5/4 is an 8-bit
+         * approximation of pixel p. Stepping by 8 in both axes keeps
+         * the CFA phase constant, so every sample is the same colour
+         * and the thumbnail has no checkerboard. */
+        const uint8_t *src = (paused && scratch_map) ? scratch_map
+                                                     : bstate.payload_map;
+        uint32_t pitch = (paused && scratch_map) ? scratch_pitch
+                                                 : bstate.payload_pitch;
+        if (!src) { snprintf(reply, cap, "err no payload buffer"); return; }
+        /* Step 4, not 8: this preview is what a crop gets chosen
+         * from, so detail matters more than the (already negligible)
+         * cost of reading 480x270 bytes. Even steps only -- an odd one
+         * would walk the CFA phase and stripe the image. */
+        const int step = 4, w = WIDTH / step, h = HEIGHT / step;
+        FILE *f = fopen("/run/bridge-preview.pgm.new", "wb");
+        if (!f) {
+            snprintf(reply, cap, "err preview: %s", strerror(errno));
+            return;
+        }
+        fprintf(f, "P5\n%d %d\n255\n", w, h);
+        for (int y = 0; y < h; y++) {
+            const uint8_t *line = src + (size_t)(y * step) * pitch;
+            for (int x = 0; x < w; x++)
+                fputc(line[(x * step) * 5 / 4], f);
+        }
+        fclose(f);
+        rename("/run/bridge-preview.pgm.new", "/run/bridge-preview.pgm");
+        snprintf(reply, cap, "ok /run/bridge-preview.pgm %d %d", w, h);
+        return;
+    }
+    if (!strcmp(cmd, "pause")) {
+        if (scratch_fd < 0) {
+            snprintf(reply, cap, "err no scratch buffer; cannot pause "
+                                 "without disturbing the picture");
+            return;
+        }
+        paused = 1;
+        snprintf(reply, cap, "ok paused -- the display holds the last "
+                             "complete frame, the sensor keeps running");
+        return;
+    }
+    if (!strcmp(cmd, "resume")) {
+        paused = 0;
+        snprintf(reply, cap, "ok resumed");
         return;
     }
     snprintf(reply, cap, "err the bridge speaks: bridge status. The "
@@ -616,6 +682,16 @@ int main(int argc, char **argv) {
                         0, 1, WIDTH, HEIGHT,
                         0, 0, WIDTH << 16, HEIGHT << 16))
         die("SetPlane");
+    /* Somewhere for the sensor to write while the display holds still.
+     * Same geometry, never scanned out -- so the only cost of pause is
+     * one buffer, and the picture never learns about it. */
+    struct dumb scratch = make_fb(dfd, WIDTH, HEIGHT);
+    scratch_map = scratch.map;
+    scratch_pitch = scratch.pitch;
+    if (drmPrimeHandleToFD(dfd, scratch.handle, DRM_CLOEXEC | DRM_RDWR,
+                           &scratch_fd))
+        fprintf(stderr, "bridge: no scratch dma-buf; pause unavailable\n");
+
     int dmabuf = -1;
     if (drmPrimeHandleToFD(dfd, pay.handle, DRM_CLOEXEC | DRM_RDWR, &dmabuf))
         die("PrimeHandleToFD");
@@ -787,7 +863,11 @@ int main(int argc, char **argv) {
         double t_now = dqts.tv_sec + dqts.tv_nsec * 1e-9;
         seq++;
         pack_header(base.map, seq, SOURCE_ID_OV5647);
-        dq.m.fd = dmabuf;              /* same BO back into its slot */
+        /* Where the NEXT frame lands: the displayed buffer, or the
+         * scratch one while paused. Both slots may carry either fd --
+         * V4L2 takes the dma-buf at queue time, so a pause is one
+         * assignment and never a STREAMOFF. */
+        dq.m.fd = (paused && scratch_fd >= 0) ? scratch_fd : dmabuf;
         if (ioctl(vfd, VIDIOC_QBUF, &dq) < 0) { perror("QBUF"); break; }
 
         /* PHASE: sensor frame-end against the last display vblank,
@@ -949,6 +1029,8 @@ int main(int argc, char **argv) {
         bstate.vblank = vblank_cmd;
         bstate.sensor_fd = sfd;
         bstate.started = t0;
+        bstate.payload_map = pay.map;
+        bstate.payload_pitch = pay.pitch;
         struct bridge_frame bf = {
             .seq = seq, .phase_lines = lines_f,
             .locked = locked, .sensor_fd = sfd};

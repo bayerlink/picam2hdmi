@@ -180,8 +180,17 @@
     <h2>Bridge</h2>
     <div id="bridgebar">
       <span id="bridgestate">checking…</span>
+      <button id="bpause" onclick="bridgePause()">Pause</button>
     </div>
     <div id="bridgesensor" class="raw" style="text-align:left"></div>
+    <div id="bridgeprev" hidden>
+      <div style="color:#8b949e;font-size:.8rem;margin:.4rem 0">
+        the display is holding the last frame; the sensor is still
+        running, and this is what it is writing now</div>
+      <img id="bprev" alt="sensor preview"
+           style="max-width:100%;border:1px solid #30363d;border-radius:6px;
+                  image-rendering:pixelated">
+    </div>
   </section>
 
   <section class="below" id="ispwrap">
@@ -750,6 +759,22 @@ async function bridgePoll() {
   $('bridgesensor').textContent =
     'exposure ' + st.exposure + ' lines, gain ' + st.gain +
     ' (' + (st.gain / 16).toFixed(2) + 'x)';
+  const held = !!st.paused;
+  $('bpause').textContent = held ? 'Resume' : 'Pause';
+  $('bpause').className = held ? 'go' : '';
+  $('bridgeprev').hidden = !held;
+  // Only while paused: the preview costs a decimated read of the buffer
+  // the sensor is writing, and there is no reason to pay it when the
+  // same picture is already on the television.
+  if (held) $('bprev').src = '/bridge/preview.png?t=' + Date.now();
+}
+
+async function bridgePause() {
+  err('');
+  const held = $('bpause').textContent === 'Resume';
+  try { await api('POST', held ? '/bridge/resume' : '/bridge/pause'); }
+  catch (x) { return err('bridge: ' + x.message); }
+  bridgePoll();
 }
 
 bridgePoll();
