@@ -275,38 +275,12 @@ static void ctl_open(void) {
  * it. If it is not, ONE bounded 5 ms grace -- a command arrives at
  * human cadence and may cost a frame's slack; it may never cost the
  * loop an unbounded wait. */
-/* The UI's writes must never be fatal: set_ctrl above exits on
- * failure, which is right during bring-up (a sensor that refuses its
- * configuration has no picture to offer) and catastrophic afterwards
- * -- a mistyped gain from a web panel would take the display down. */
-static int try_ctrl(int fd, uint32_t id, int32_t value) {
-    struct v4l2_control c = {.id = id, .value = value};
-    return ioctl(fd, VIDIOC_S_CTRL, &c) < 0 ? -1 : 0;
-}
-
 static int read_ctrl(int fd, uint32_t id, int32_t *out) {
     struct v4l2_control c = {.id = id};
     if (ioctl(fd, VIDIOC_G_CTRL, &c) < 0) return -1;
     *out = c.value;
     return 0;
 }
-
-/* V4L2 CLAMPS an out-of-range control and reports success, so asking
- * for gain 99999 answers "ok" and quietly gives you the maximum. Read
- * the value back and report what the sensor actually took: a caller
- * that hears its own number back is entitled to believe it. */
-static void ctrl_applied(int fd, uint32_t id, long long asked,
-                         char *reply, size_t cap) {
-    int32_t got;
-    if (read_ctrl(fd, id, &got) < 0)
-        snprintf(reply, cap, "ok");
-    else if (got == (int32_t)asked)
-        snprintf(reply, cap, "ok %d", got);
-    else
-        snprintf(reply, cap, "ok %d (asked %lld, clamped by the sensor)",
-                 got, asked);
-}
-
 
 /* What the loop knows, published for the control socket. Written once
  * per frame by the loop and read between frames by the same thread, so
@@ -323,7 +297,6 @@ static struct {
  * seconds; the rest are the sensor's actuators, which the bridge holds
  * open and nobody else can reach while it runs. */
 static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
-    long long v;
     if (!strcmp(cmd, "status")) {
         int32_t exposure = -1, gain = -1;
         if (bstate.sensor_fd >= 0) {
@@ -339,29 +312,9 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
                  exposure, gain);
         return;
     }
-    if (sscanf(cmd, "exposure %lld", &v) == 1) {
-        if (bstate.sensor_fd < 0)
-            snprintf(reply, cap, "err the sensor is not open yet");
-        else if (try_ctrl(bstate.sensor_fd, V4L2_CID_EXPOSURE, (int32_t)v))
-            snprintf(reply, cap, "err exposure %lld refused: %s", v,
-                     strerror(errno));
-        else
-            ctrl_applied(bstate.sensor_fd, V4L2_CID_EXPOSURE, v, reply, cap);
-        return;
-    }
-    if (sscanf(cmd, "gain %lld", &v) == 1) {
-        if (bstate.sensor_fd < 0)
-            snprintf(reply, cap, "err the sensor is not open yet");
-        else if (try_ctrl(bstate.sensor_fd, V4L2_CID_ANALOGUE_GAIN,
-                          (int32_t)v))
-            snprintf(reply, cap, "err gain %lld refused: %s", v,
-                     strerror(errno));
-        else
-            ctrl_applied(bstate.sensor_fd, V4L2_CID_ANALOGUE_GAIN, v, reply, cap);
-        return;
-    }
-    snprintf(reply, cap, "err the bridge speaks: bridge status, "
-                         "bridge exposure <lines>, bridge gain <code>");
+    snprintf(reply, cap, "err the bridge speaks: bridge status. The "
+                         "sensor's exposure and gain are the AE loop's "
+                         "to write, not a caller's.");
 }
 
 static void ctl_poll(void) {

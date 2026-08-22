@@ -821,31 +821,6 @@ def _handler(supervisor: Supervisor):
                 if not r.startswith("ok"):
                     return self._send(400, {"error": r})
                 return self._send(200, {"set": key, "value": value})
-            if self.path == "/bridge/set":
-                length = int(self.headers.get("Content-Length", 0))
-                try:
-                    body = json.loads(self.rfile.read(length) or b"{}")
-                    what, value = str(body["control"]), int(body["value"])
-                except (ValueError, KeyError) as error:
-                    return self._send(400, {
-                        "error": '/bridge/set takes {"control": '
-                                 '"exposure"|"gain", "value": int}: '
-                                 f"{error}"})
-                if what not in ("exposure", "gain"):
-                    return self._send(400, {
-                        "error": f"the bridge drives 'exposure' and 'gain', "
-                                 f"not {what!r}"})
-                try:
-                    r = _bridge_command(f"bridge {what} {value}")
-                except OSError as error:
-                    return self._send(503, {
-                        "error": f"bridge control socket: {error}"})
-                if not r.startswith("ok"):
-                    return self._send(400, {"error": r})
-                # "ok 300" or "ok 1023 (asked 99999, clamped ...)" -- the
-                # applied value goes back so the panel shows the truth
-                # rather than what was typed.
-                return self._send(200, {"control": what, "applied": r[3:].strip()})
             if self.path == "/isp/commit":
                 try:
                     r = _bridge_command("commit")
