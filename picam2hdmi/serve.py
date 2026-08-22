@@ -674,6 +674,27 @@ def _handler(supervisor: Supervisor):
             if self.path == "/modules":
                 from . import modules_mgr
                 return self._send(200, modules_mgr.status())
+            if self.path == "/bridge/status":
+                # The bridge is the real-time owner on this bench: it
+                # holds the sensor and the display and keeps the picture
+                # alive whether or not this daemon is running. The panel
+                # does not stream alongside it -- it drives it.
+                try:
+                    r = _bridge_command("bridge status")
+                except OSError as error:
+                    return self._send(503, {
+                        "error": f"the bridge is not running, or its "
+                                 f"control socket is unreachable: {error}"})
+                if not r.startswith("ok"):
+                    return self._send(400, {"error": r})
+                fields = {}
+                for token in r[3:].split():
+                    key, _, value = token.partition("=")
+                    try:
+                        fields[key] = float(value) if "." in value else int(value)
+                    except ValueError:
+                        fields[key] = value
+                return self._send(200, fields)
             if self.path == "/isp/params":
                 regmap = _isp_regmap()
                 if regmap is None:
@@ -800,6 +821,31 @@ def _handler(supervisor: Supervisor):
                 if not r.startswith("ok"):
                     return self._send(400, {"error": r})
                 return self._send(200, {"set": key, "value": value})
+            if self.path == "/bridge/set":
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                    what, value = str(body["control"]), int(body["value"])
+                except (ValueError, KeyError) as error:
+                    return self._send(400, {
+                        "error": '/bridge/set takes {"control": '
+                                 '"exposure"|"gain", "value": int}: '
+                                 f"{error}"})
+                if what not in ("exposure", "gain"):
+                    return self._send(400, {
+                        "error": f"the bridge drives 'exposure' and 'gain', "
+                                 f"not {what!r}"})
+                try:
+                    r = _bridge_command(f"bridge {what} {value}")
+                except OSError as error:
+                    return self._send(503, {
+                        "error": f"bridge control socket: {error}"})
+                if not r.startswith("ok"):
+                    return self._send(400, {"error": r})
+                # "ok 300" or "ok 1023 (asked 99999, clamped ...)" -- the
+                # applied value goes back so the panel shows the truth
+                # rather than what was typed.
+                return self._send(200, {"control": what, "applied": r[3:].strip()})
             if self.path == "/isp/commit":
                 try:
                     r = _bridge_command("commit")

@@ -176,6 +176,27 @@
     <div id="previewcap"></div>
   </section>
 
+  <section class="below" id="bridgewrap">
+    <h2>Bridge</h2>
+    <div id="bridgebar">
+      <span id="bridgestate">checking…</span>
+    </div>
+    <div id="bridgectl" hidden>
+      <div class="ispreg">
+        <span class="k">exposure</span>
+        <span><input type="range" id="bexp" min="4" max="1121" step="1">
+          <input type="number" id="bexpn" min="4" max="1121"></span>
+        <span class="raw" id="bexpr">lines</span>
+      </div>
+      <div class="ispreg">
+        <span class="k">analogue gain</span>
+        <span><input type="range" id="bgain" min="16" max="1023" step="1">
+          <input type="number" id="bgainn" min="16" max="1023"></span>
+        <span class="raw" id="bgainr">code</span>
+      </div>
+    </div>
+  </section>
+
   <section class="below" id="ispwrap">
     <h2>ISP parameters</h2>
     <div id="ispbar">
@@ -693,6 +714,59 @@ refresh();
 fetchCameras();
 setInterval(refresh, 1500);
 setInterval(fetchCameras, 30000);   // a reseated ribbon shows up by itself
+
+/* ---- the bridge: the real-time owner of sensor and display ------- */
+/* It keeps the picture alive whether or not this daemon runs, so the
+ * panel does not stream alongside it -- it drives it. */
+let bridgeSeq = null, bridgeAt = 0;
+
+async function bridgePoll() {
+  let st;
+  try { st = await api('GET', '/bridge/status'); }
+  catch (x) {
+    $('bridgestate').textContent = 'not running — ' + x.message;
+    $('bridgectl').hidden = true;
+    bridgeSeq = null;
+    return;
+  }
+  const now = Date.now() / 1000;
+  let fps = '';
+  if (bridgeSeq !== null && now > bridgeAt)
+    fps = ', ' + ((st.seq - bridgeSeq) / (now - bridgeAt)).toFixed(1) + ' fps';
+  bridgeSeq = st.seq; bridgeAt = now;
+  $('bridgestate').textContent =
+    (st.locked ? 'LOCKED' : 'not locked') + fps +
+    ', phase ' + st.phase + ' lines, margin ' + st.margin +
+    ', up ' + Math.floor(st.uptime / 60) + ' min';
+  $('bridgestate').style.color = st.locked ? '#3fb950' : '#d29922';
+  $('bridgectl').hidden = false;
+  // Do not fight the operator's hands: only adopt the sensor's values
+  // for a control that is not being dragged right now.
+  for (const [id, value] of [['bexp', st.exposure], ['bgain', st.gain]]) {
+    if (document.activeElement === $(id) || document.activeElement === $(id + 'n'))
+      continue;
+    $(id).value = value; $(id + 'n').value = value;
+  }
+}
+
+async function bridgeSet(control, value, echo) {
+  err('');
+  try {
+    const r = await api('POST', '/bridge/set', {control, value});
+    $(echo).textContent = r.applied;
+  } catch (x) { err('bridge ' + control + ': ' + x.message); }
+}
+
+for (const [id, control, echo] of [['bexp', 'exposure', 'bexpr'],
+                                   ['bgain', 'gain', 'bgainr']]) {
+  const range = $(id), num = $(id + 'n');
+  range.oninput = () => { num.value = range.value; };
+  range.onchange = () => bridgeSet(control, Number(range.value), echo);
+  num.onchange = () => { range.value = num.value;
+                         bridgeSet(control, Number(num.value), echo); };
+}
+bridgePoll();
+setInterval(bridgePoll, 2000);
 
 /* ---- ISP parameters: widgets straight from the register map ------ */
 /* The map states everything (widget kind, min/max, Q format, choices,
