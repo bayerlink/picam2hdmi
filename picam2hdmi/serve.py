@@ -642,54 +642,56 @@ CLIP_PATH = "/run/bridge-clip.raw"
 
 
 def _prepare_clip(path: Path) -> dict:
-    """Normalise a recording into whole bayerlink containers.
+    """A recording into the raw containers the bridge plays.
 
-    The header row is part of the format, not packaging: it states the
-    CFA phase, the geometry and the depth of the frame behind it. A
-    recording that carries one is replayed with it untouched -- record
-    the wire, replay the wire -- because the alternative is stamping
-    the live sensor's facts onto somebody else's picture, and a wrong
-    Bayer phase is a picture with its colours swapped.
+    The FORMAT is bayerlink's -- what a recorded frame is, and that the
+    header row is part of it, is the codec's to define, not this
+    instrument's. All that happens here is the flattening: whole
+    containers, tightly packed, for a bridge that copies rows.
 
-    Recordings that PREDATE the header row still exist on benches. They
-    are playable, but only by generating a header, and a generated
-    header is a guess about phase. So it is generated from the codec
-    that owns the format, and reported as generated rather than
-    quietly passed off as recorded.
+    Recordings predating the header row still exist on benches. They
+    remain playable, but only by generating one, and a generated header
+    is a guess about mosaic order -- so it is built by the codec that
+    owns the format and reported as generated rather than passed off as
+    recorded.
     """
     import numpy as np
+    from bayerlink import recording
 
-    stack = np.load(path, mmap_mode="r")
-    if stack.ndim == 3:
-        stack = stack[None]
-    if stack.ndim != 4 or stack.shape[-1] != 3:
-        raise ValueError(f"{path.name}: expected (frames, lines, samples, 3), "
-                         f"got {stack.shape}")
-    frames, lines, width, _ = stack.shape
-    if width != 1920 or lines not in (1080, 1081):
-        raise ValueError(f"{path.name}: {width}x{lines} is not a 1920x1080 "
-                         "payload (with or without the header row); the "
-                         "bridge's raster is fixed at build time")
-
-    header = None
-    if lines == 1080:
+    try:
+        stack = recording.load(path)
+        recording.split(stack[0])
+        header_source = "recorded"
+    except ValueError:
+        # No header row, or one that does not parse: fall back to the
+        # legacy shape and say so.
         from bayerlink.protocol import Header, fourcc_for
-        # The order is the one this bench's sensor reports; it cannot be
-        # recovered from a file that never carried it.
-        header = np.frombuffer(
+
+        legacy = np.load(path, mmap_mode="r")
+        if legacy.ndim == 3:
+            legacy = legacy[None]
+        if legacy.ndim != 4 or legacy.shape[1:] != (1080, 1920, 3):
+            raise ValueError(
+                f"{path.name}: not a bayerlink recording, and not a bare "
+                f"1920x1080 payload either (shape {legacy.shape}); the "
+                "bridge's raster is fixed at build time") from None
+        row = np.frombuffer(
             Header(fourcc=fourcc_for("GBRG", 10), width=1920, height=1080,
                    frame_seq=0, source_id=0).pack().ljust(1920 * 3, b"\x00"),
             dtype=np.uint8).reshape(1, 1920, 3)
+        stack = np.concatenate(
+            [np.broadcast_to(row, (len(legacy), 1, 1920, 3)), legacy], axis=1)
+        header_source = "generated"
 
+    if stack.shape[1:] != (1081, 1920, 3):
+        raise ValueError(
+            f"{path.name}: {stack.shape[2]}x{stack.shape[1] - 1} is not the "
+            "bridge's 1920x1080 raster, which is fixed at build time")
     with open(CLIP_PATH + ".new", "wb") as out:
-        for i in range(frames):
-            frame = np.asarray(stack[i])
-            if header is not None:
-                out.write(np.ascontiguousarray(header).tobytes())
-            out.write(np.ascontiguousarray(frame).tobytes())
+        for i in range(len(stack)):
+            out.write(np.ascontiguousarray(stack[i]).tobytes())
     Path(CLIP_PATH + ".new").rename(CLIP_PATH)
-    return {"frames": frames,
-            "header": "recorded" if header is None else "generated"}
+    return {"frames": len(stack), "header": header_source}
 
 
 def _bridge_up(attempts: int = 40) -> bool:
