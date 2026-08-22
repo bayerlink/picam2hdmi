@@ -761,7 +761,16 @@ int main(int argc, char **argv) {
     while (running && (seconds <= 0 || time(NULL) - t0 < seconds)) {
         struct pollfd pf = {.fd = vfd, .events = POLLIN};
         if (poll(&pf, 1, 2000) <= 0) {
-            fprintf(stderr, "bridge: no frame for 2s\n"); continue;
+            fprintf(stderr, "bridge: no frame for 2s\n");
+            // The control socket must survive a stalled camera. It used
+            // to be serviced only at the END of a frame, so a sensor
+            // that stopped delivering made the bridge deaf as well as
+            // blind: connections queued until the backlog filled and
+            // callers got EAGAIN from connect(), which reads as "the
+            // bridge is gone" exactly when someone is trying to ask it
+            // what is wrong.
+            ctl_poll();
+            continue;
         }
         struct v4l2_buffer dq = {
             .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,

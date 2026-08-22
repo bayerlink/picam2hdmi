@@ -288,6 +288,22 @@ function fetchCameras() {
   api('GET', '/cameras')
     .then(r => {
       cameras = r.cameras;
+      // When the bridge owns the bench, say so where the sources are
+      // chosen -- an empty list with no explanation reads as a broken
+      // page, and every source here would fail anyway: the bridge holds
+      // the camera AND the display.
+      const owned = r.owner === 'bridge';
+      let note = $('srcowner');
+      if (!note) {
+        note = document.createElement('div');
+        note.id = 'srcowner';
+        note.style.cssText = 'color:#d29922;font-size:.8rem;margin:.4rem 0';
+        $('sources').insertBefore(note, $('srclist'));
+      }
+      note.textContent = owned
+        ? 'The genlocked bridge owns the camera and the display, so it '
+          + 'is driving the picture. Sources here need it stopped.'
+        : '';
       const live = cameras.find(c => c.modes && c.modes.length);
       if (live) modeOptions(live.modes, $('cmode').value);
       renderSources();

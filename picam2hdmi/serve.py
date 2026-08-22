@@ -598,6 +598,22 @@ def _bridge_command(line: str) -> str:
         s.close()
 
 
+def _bridge_running() -> bool:
+    """Whether the genlocked bridge is the one driving the bench.
+
+    Asked by anything that would otherwise TOUCH the camera or the
+    display: while the bridge runs it owns both, and merely opening the
+    sensor to enumerate it is enough to starve the loop of frames --
+    which is not a theory, it is what took the picture down on
+    2026-08-22 every time a panel tab polled for cameras.
+    """
+    try:
+        _bridge_command("bridge status")
+        return True
+    except OSError:
+        return False
+
+
 def _isp_regmap():
     """The register map the installed ISP module carries, or None."""
     from . import modules_mgr
@@ -649,6 +665,17 @@ def _handler(supervisor: Supervisor):
             if self.path == "/status":
                 return self._send(200, supervisor.status())
             if self.path == "/cameras":
+                # Do not open the sensor behind the bridge's back. The
+                # enumeration itself acquires the camera, and the bridge
+                # is mid-stream on it.
+                if _bridge_running():
+                    return self._send(200, {
+                        "cameras": [],
+                        "owner": "bridge",
+                        "note": "the genlocked bridge holds the camera "
+                                "and the display; stop it to use this "
+                                "panel as the source (systemctl stop "
+                                "bridge)"})
                 # Enumerated fresh on each ask: cameras appear when a ribbon
                 # is reseated, and a panel poll should see that without a
                 # daemon restart. On a bench with no camera stack this is
