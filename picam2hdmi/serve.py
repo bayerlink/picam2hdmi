@@ -391,6 +391,12 @@ class Supervisor:
         desired = self.stored_spec()
         if not desired or desired.get("source", "off") == "off":
             return False
+        # A live camera is the BRIDGE's intent to satisfy, never this
+        # daemon's: reviving it here would open the sensor the bridge is
+        # mid-stream on and take its frames away, which is precisely how
+        # the picture died on 2026-08-22.
+        if desired.get("source") == "camera":
+            return False
         if self._thread is not None and self._thread.is_alive():
             return False
         try:
@@ -598,6 +604,35 @@ def _bridge_command(line: str) -> str:
         s.close()
 
 
+def _sensors_from_sysfs() -> list:
+    """The sensors present, read from sysfs -- no device is opened.
+
+    Enumerating through libcamera ACQUIRES the camera, which is exactly
+    what starved the bridge of frames. The kernel already names every
+    v4l2 subdev ("ov5647 10-0036"), and a name is all a source list
+    needs.
+    """
+    found = []
+    for name in sorted(Path("/sys/class/video4linux").glob("v4l-subdev*/name")):
+        try:
+            model = name.read_text().split()[0]
+        except OSError:
+            continue
+        if model and model not in found:
+            found.append(model)
+    return found
+
+
+def _bridge_service(action: str) -> bool:
+    """Start or stop the genlocked bridge. The panel orchestrates which
+    engine owns the bench, because a person choosing a source should not
+    have to know there are two daemons."""
+    import subprocess
+
+    return subprocess.run(["systemctl", action, "bridge"],
+                          check=False).returncode == 0
+
+
 def _bridge_running() -> bool:
     """Whether the genlocked bridge is the one driving the bench.
 
@@ -669,13 +704,16 @@ def _handler(supervisor: Supervisor):
                 # enumeration itself acquires the camera, and the bridge
                 # is mid-stream on it.
                 if _bridge_running():
+                    # Named from sysfs, never acquired: the bridge is
+                    # mid-stream on it and enumeration would steal its
+                    # frames. It stays IN the list -- it is what is on
+                    # the television -- and says who is driving it.
                     return self._send(200, {
-                        "cameras": [],
-                        "owner": "bridge",
-                        "note": "the genlocked bridge holds the camera "
-                                "and the display; stop it to use this "
-                                "panel as the source (systemctl stop "
-                                "bridge)"})
+                        "cameras": [{"index": i, "model": model,
+                                     "driven_by": "bridge"}
+                                    for i, model in
+                                    enumerate(_sensors_from_sysfs())],
+                        "owner": "bridge"})
                 # Enumerated fresh on each ask: cameras appear when a ribbon
                 # is reseated, and a panel poll should see that without a
                 # daemon restart. On a bench with no camera stack this is
@@ -931,6 +969,28 @@ def _handler(supervisor: Supervisor):
             if self.path == "/source":
                 try:
                     spec = json.loads(self.rfile.read(length) or b"{}")
+                    # ONE selection decides what is on the television,
+                    # and the panel picks the engine for it: the
+                    # genlocked bridge drives the live camera, this
+                    # daemon drives files and patterns, and the two can
+                    # never run at once because there is one display.
+                    # Somebody choosing a source should not have to know
+                    # any of that.
+                    wanted = spec.get("source", "off")
+                    if wanted == "camera":
+                        supervisor.stop()
+                        if not _bridge_running():
+                            _bridge_service("start")
+                        supervisor._persist_intent(spec)
+                        return self._send(200, supervisor.status())
+                    # everything else needs the display, so the bridge
+                    # hands it back first
+                    if _bridge_running():
+                        _bridge_service("stop")
+                    if wanted == "off":
+                        supervisor.stop()
+                        supervisor._persist_intent({"source": "off"})
+                        return self._send(200, supervisor.status())
                     supervisor.start(spec)
                 except Exception as error:   # noqa: BLE001 -- named, not dropped
                     # Whatever went wrong belongs in the response: an
