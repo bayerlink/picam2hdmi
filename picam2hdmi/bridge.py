@@ -207,7 +207,7 @@ def main() -> int:
     parser.add_argument("--seconds", type=float, default=0.0)
     args = parser.parse_args()
 
-    from bayerlink.protocol import Header, fourcc_for, source_id_for
+    from bayerlink.protocol import Header, fourcc_for
 
     # --- display: one mode, two planes ---------------------------------
     card = kms.Card.open()
@@ -259,7 +259,7 @@ def main() -> int:
             fcntl.ioctl(vfd, VIDIOC_STREAMON,
                         struct.pack("i", BUF_TYPE_CAPTURE))
 
-            sid = source_id_for("ov5647") or 0
+            sid = 0          # one sensor on this device
             fourcc = fourcc_for(BAYER_ORDER, BITS)
             sequence = 0
             t0 = time.monotonic()

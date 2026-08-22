@@ -144,7 +144,7 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
             "camera capture needs Picamera2 (sudo apt install "
             f"python3-picamera2), which is Pi-only: {error}") from None
 
-    from bayerlink import encode_packed, source_id_for
+    from bayerlink import encode_packed
     from bayerlink import tunnel as _tunnel
     from bayerlink.protocol import _GROUP
 
@@ -185,7 +185,10 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     config["controls"]["FrameDurationLimits"] = (int(lo), int(hi))
     picam2.configure(config)
     model = picam2.camera_properties.get("Model")
-    sid = source_id_for(model) if source_id is None else int(source_id)
+    # source_id is an INDEX of the sources on this device, not an
+    # identity: 0 unless something knows better, which on a one-camera
+    # Pi is every time.
+    sid = 0 if source_id is None else int(source_id)
     raw_config = picam2.camera_configuration()["raw"]
     fmt = raw_config["format"]
     order, bits = order_from_format(fmt)

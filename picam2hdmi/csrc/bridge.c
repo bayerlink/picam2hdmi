@@ -78,7 +78,11 @@ static const struct { const char *name; uint32_t fourcc; } ORDERS[] = {
 };
 static uint32_t bl_fourcc = 0x41414770u;    /* GBRG: the driver was
                                              * right; see above */
-#define SOURCE_ID_OV5647 1
+/* source_id indexes the SOURCES on this device -- 0 here, because
+ * there is one sensor. It is not an identity: two cameras of the same
+ * model are two sources, and calibration reaches the receiver over the
+ * link's register channel, not by being guessed from this number. */
+#define SOURCE_ID_OV5647 0
 
 /* The 1080p30 raster, from kms.py's _RASTERS -- one owner, restated
  * here because C cannot import it; `make check` cannot hold a modeline,
