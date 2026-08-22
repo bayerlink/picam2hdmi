@@ -354,11 +354,17 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
                 if (fd >= 0) close(fd);
                 return;
             }
-            size_t frame = (size_t)WIDTH * HEIGHT * 3;
+            /* A clip frame is a whole bayerlink container -- the
+             * header row included. That row carries the CFA phase,
+             * the geometry and the depth of the frame BEHIND it, so
+             * replacing it with this bridge's own header would hand
+             * the receiver the live sensor's facts about somebody
+             * else's picture. */
+            size_t frame = (size_t)WIDTH * VDISP * 3;
             if ((size_t)st.st_size < frame) {
                 snprintf(reply, cap, "err %s: %lld bytes is less than one "
-                         "%ux%u frame", path, (long long)st.st_size,
-                         WIDTH, HEIGHT);
+                         "%ux%u container", path, (long long)st.st_size,
+                         WIDTH, VDISP);
                 close(fd);
                 return;
             }
@@ -915,7 +921,11 @@ int main(int argc, char **argv) {
         clock_gettime(CLOCK_MONOTONIC, &dqts);
         double t_now = dqts.tv_sec + dqts.tv_nsec * 1e-9;
         seq++;
-        pack_header(base.map, seq, SOURCE_ID_OV5647);
+        /* Record the wire, replay the wire: a clip carries its own
+         * header and it goes out untouched, so a replayed capture is
+         * the bytes that were captured. */
+        if (!clip_map)
+            pack_header(base.map, seq, SOURCE_ID_OV5647);
         /* Where the NEXT frame lands: the displayed buffer, or the
          * scratch one while paused. Both slots may carry either fd --
          * V4L2 takes the dma-buf at queue time, so a pause is one
@@ -928,9 +938,10 @@ int main(int argc, char **argv) {
          * no reason to move six megabytes a frame to show one picture. */
         if (clip_map && (clip_frames > 1 || !clip_drawn)) {
             const uint8_t *src = clip_map + clip_at * clip_frame_bytes;
+            memcpy(base.map, src, WIDTH * 3);          /* the recorded header */
             for (uint32_t r = 0; r < HEIGHT; r++)
                 memcpy(pay.map + (size_t)r * pay.pitch,
-                       src + (size_t)r * WIDTH * 3, WIDTH * 3);
+                       src + (size_t)(r + 1) * WIDTH * 3, WIDTH * 3);
             clip_at = (clip_at + 1) % clip_frames;
             clip_drawn = 1;
         }

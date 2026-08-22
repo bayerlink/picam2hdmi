@@ -641,14 +641,21 @@ def _bridge_service(action: str) -> bool:
 CLIP_PATH = "/run/bridge-clip.raw"
 
 
-def _prepare_clip(path: Path) -> int:
-    """Normalise a recording into payload rows the bridge can play.
+def _prepare_clip(path: Path) -> dict:
+    """Normalise a recording into whole bayerlink containers.
 
-    Recordings come in both shapes -- with the header row and without,
-    single frame and stacked -- so the normalising happens HERE, where
-    numpy already is. The bridge receives tightly packed payload rows
-    and keeps writing the bayerlink header itself, so a clip can never
-    carry a stale header into the link.
+    The header row is part of the format, not packaging: it states the
+    CFA phase, the geometry and the depth of the frame behind it. A
+    recording that carries one is replayed with it untouched -- record
+    the wire, replay the wire -- because the alternative is stamping
+    the live sensor's facts onto somebody else's picture, and a wrong
+    Bayer phase is a picture with its colours swapped.
+
+    Recordings that PREDATE the header row still exist on benches. They
+    are playable, but only by generating a header, and a generated
+    header is a guess about phase. So it is generated from the codec
+    that owns the format, and reported as generated rather than
+    quietly passed off as recorded.
     """
     import numpy as np
 
@@ -663,13 +670,26 @@ def _prepare_clip(path: Path) -> int:
         raise ValueError(f"{path.name}: {width}x{lines} is not a 1920x1080 "
                          "payload (with or without the header row); the "
                          "bridge's raster is fixed at build time")
+
+    header = None
+    if lines == 1080:
+        from bayerlink.protocol import Header, fourcc_for
+        # The order is the one this bench's sensor reports; it cannot be
+        # recovered from a file that never carried it.
+        header = np.frombuffer(
+            Header(fourcc=fourcc_for("GBRG", 10), width=1920, height=1080,
+                   frame_seq=0, source_id=0).pack().ljust(1920 * 3, b"\x00"),
+            dtype=np.uint8).reshape(1, 1920, 3)
+
     with open(CLIP_PATH + ".new", "wb") as out:
         for i in range(frames):
             frame = np.asarray(stack[i])
-            out.write(np.ascontiguousarray(
-                frame[1:] if lines == 1081 else frame).tobytes())
+            if header is not None:
+                out.write(np.ascontiguousarray(header).tobytes())
+            out.write(np.ascontiguousarray(frame).tobytes())
     Path(CLIP_PATH + ".new").rename(CLIP_PATH)
-    return frames
+    return {"frames": frames,
+            "header": "recorded" if header is None else "generated"}
 
 
 def _bridge_up(attempts: int = 40) -> bool:
@@ -1061,7 +1081,7 @@ def _handler(supervisor: Supervisor):
                             return self._send(404, {
                                 "error": f"no recording {spec['file']!r}"})
                         try:
-                            n = _prepare_clip(clip)
+                            clipinfo = _prepare_clip(clip)
                         except ValueError as error:
                             return self._send(400, {"error": str(error)})
                         r = _bridge_command(f"bridge source clip {CLIP_PATH}")
@@ -1069,8 +1089,9 @@ def _handler(supervisor: Supervisor):
                             return self._send(400, {"error": r})
                         supervisor._persist_intent(spec)
                         status = supervisor.status()
-                        status["playing"] = {"file": spec["file"],
-                                             "frames": n, "by": "bridge"}
+                        status["playing"] = dict(clipinfo,
+                                                 file=spec["file"],
+                                                 by="bridge")
                         return self._send(200, status)
                     # Whatever is left -- patterns, and anything at all
                     # on a machine with no bridge -- this daemon serves,
