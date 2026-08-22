@@ -1063,6 +1063,12 @@ def _handler(supervisor: Supervisor):
                     # Somebody choosing a source should not have to know
                     # any of that.
                     wanted = spec.get("source", "off")
+                    # A new selection supersedes whatever went wrong
+                    # before it. The panel shows last_error, so an error
+                    # kept past its cause makes every later success look
+                    # like a failure -- which is exactly how a working
+                    # bench reads as broken.
+                    supervisor.last_error = None
                     if wanted == "camera" and _bridge_up():
                         # A bridge exists and it owns live camera: hand
                         # the bench over. Where there is no bridge --  a
