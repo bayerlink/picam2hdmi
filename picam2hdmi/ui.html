@@ -128,6 +128,8 @@
 <main>
   <div id="left">
   <div class="card" id="pane-camera">
+    <div id="camfixed" style="color:#d29922;font-size:.85rem;margin-bottom:.6rem"
+         hidden></div>
     <!-- Options are filled from the SENSOR's own mode list (see
          modeOptions); these are the fallback for a daemon that cannot
          enumerate, never the authority. -->
@@ -251,6 +253,24 @@ function showCards() {
   if (kind === 'camera') drawCrop();
 }
 
+/* The bridge streams at a geometry fixed when it was built, and takes
+ * exposure and gain from its own loop. Offering controls it cannot act
+ * on is worse than not offering them: the picture does not change and
+ * nothing says why. */
+function cameraControlsFor(owner) {
+  const fixed = owner === 'bridge';
+  for (const id of ['cmode', 'cexp', 'cgain', 'ctun'])
+    if ($(id)) $(id).disabled = fixed;
+  const note = $('camfixed');
+  if (!note) return;
+  note.hidden = !fixed;
+  note.textContent = fixed
+    ? 'The bridge is streaming this sensor at the geometry it was built '
+      + 'for (1920x1080), and drives exposure and gain from its own loop. '
+      + 'These do not apply while it owns the bench.'
+    : '';
+}
+
 function chooseSource(kind, id) {
   chosen = {kind, id};
   showCards();
@@ -293,6 +313,7 @@ function fetchCameras() {
       // page, and every source here would fail anyway: the bridge holds
       // the camera AND the display.
       const owned = r.owner === 'bridge';
+      cameraControlsFor(r.owner);
       let note = $('srcowner');
       if (!note) {
         note = document.createElement('div');

@@ -1158,10 +1158,25 @@ def _handler(supervisor: Supervisor):
                         # the bench over. Where there is no bridge --  a
                         # development box -- this daemon stays the camera
                         # engine and nothing below changes.
+                        # Anything the bridge cannot act on is REFUSED,
+                        # not quietly dropped. Accepting a mode change
+                        # and then not changing the mode is the worst of
+                        # the three possible answers.
+                        ignored = [k for k in ("cam_mode", "crop",
+                                               "exposure_us", "gain")
+                                   if spec.get(k) is not None]
                         supervisor.stop()
                         _bridge_command("bridge source sensor")
-                        supervisor._persist_intent(spec)
-                        return self._send(200, supervisor.status())
+                        supervisor._persist_intent({"source": "camera"})
+                        status = supervisor.status()
+                        if ignored:
+                            status["ignored"] = {
+                                "settings": ignored,
+                                "why": "the bridge streams at the geometry "
+                                       "it was built for and drives "
+                                       "exposure and gain from its own "
+                                       "loop; these were not applied"}
+                        return self._send(200, status)
                     if wanted == "file" and spec.get("file") and _bridge_up():
                         # ONE engine: the bridge draws the clip into the
                         # same buffer the sensor would have written, so
