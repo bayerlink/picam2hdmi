@@ -399,7 +399,7 @@ class Supervisor:
         # second timer, and the second one kept re-creating the very
         # PermissionError the panel was showing, so a working bench
         # read as a broken one no matter what was clicked.
-        if _bridge_running():
+        if _bridge_owns_bench():
             return False
         if self._thread is not None and self._thread.is_alive():
             return False
@@ -698,6 +698,50 @@ def _prepare_clip(path: Path) -> dict:
     return {"frames": len(stack), "header": header_source}
 
 
+RAW_CAPTURE = "/run/bridge-capture.raw"
+
+
+def _capture_from_bridge(spool: Path) -> str:
+    """Freeze, copy the displayed container, carry on.
+
+    The bridge is the engine, so the frame to capture is the one IT is
+    showing. Taken while paused, which costs the picture nothing and
+    makes the copy whole by construction: the sensor is writing the
+    scratch buffer, so there is no next frame racing the read. Grabbing
+    it live would tear, because the following frame begins the instant
+    the last one lands.
+
+    Saved through bayerlink's recording format, header row included --
+    so a capture is a container, and replays as the bytes it was.
+    """
+    import time
+
+    import numpy as np
+    from bayerlink import recording
+
+    held = _bridge_command("bridge status").find("paused=1") >= 0
+    if not held:
+        _bridge_command("bridge pause")
+        time.sleep(0.15)          # one frame at any rate this bench runs
+    try:
+        reply = _bridge_command(f"bridge capture {RAW_CAPTURE}")
+    finally:
+        if not held:
+            _bridge_command("bridge resume")
+    if not reply.startswith("ok "):
+        raise ValueError(reply)
+    _, width, lines, _steady = reply[3:].split()
+    raw = np.fromfile(RAW_CAPTURE, dtype=np.uint8)
+    container = raw.reshape(int(lines), int(width), 3)
+
+    number = 1
+    while (spool / f"capture-{number:03d}.npy").exists():
+        number += 1
+    path = spool / f"capture-{number:03d}.npy"
+    recording.save(path, container)
+    return path.name
+
+
 def _bridge_up(attempts: int = 40) -> bool:
     """Start the bridge if needed and wait for it to answer.
 
@@ -721,6 +765,28 @@ def _bridge_up(attempts: int = 40) -> bool:
         if _bridge_running():
             return True
     return False
+
+
+def _bridge_owns_bench() -> bool:
+    """Whether the bridge is the engine here -- asked of systemd, not of
+    a socket.
+
+    Ownership and reachability are different questions, and confusing
+    them cost the picture: during the seconds a bridge spends building,
+    opening the sensor and reaching its loop, its control socket does
+    not answer yet. Anything that reads "no bridge" from that silence
+    -- the keeper above all -- reaches for the camera the bridge is
+    about to stream, and the bridge then starves for as long as it
+    runs. The unit is active from the moment it is started, which is
+    exactly when the hands must come off.
+    """
+    import subprocess
+
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", "bridge"],
+                              check=False).returncode == 0
+    except OSError:
+        return False
 
 
 def _bridge_running() -> bool:
@@ -793,7 +859,7 @@ def _handler(supervisor: Supervisor):
                 # Do not open the sensor behind the bridge's back. The
                 # enumeration itself acquires the camera, and the bridge
                 # is mid-stream on it.
-                if _bridge_running():
+                if _bridge_owns_bench():
                     # Named from sysfs, never acquired: the bridge is
                     # mid-stream on it and enumeration would steal its
                     # frames. It stays IN the list -- it is what is on
@@ -970,6 +1036,13 @@ def _handler(supervisor: Supervisor):
 
         def do_POST(self):
             if self.path == "/capture":
+                if _bridge_running():
+                    try:
+                        name = _capture_from_bridge(supervisor.spool)
+                    except (OSError, ValueError) as error:
+                        return self._send(400, {
+                            "error": f"{type(error).__name__}: {error}"})
+                    return self._send(200, {"saved": name, "by": "bridge"})
                 try:
                     name = supervisor.capture()
                 except ValueError as error:

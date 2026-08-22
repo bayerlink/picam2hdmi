@@ -293,6 +293,7 @@ static int read_ctrl(int fd, uint32_t id, int32_t *out) {
  * stays LOCKED throughout and resuming costs nothing: the next frame
  * lands in the displayed buffer already in phase. Stopping the camera
  * instead would drop the lock and pay for it on every unpause. */
+static const uint8_t *base_map_ro;   /* the header row, for capture */
 static int paused;
 /* ONE engine: the display is driven from the sensor or from a clip in
  * memory, never from a second process. A clip is payload rows only,
@@ -385,6 +386,37 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
             return;
         }
         snprintf(reply, cap, "err source takes: sensor, clip <path>");
+        return;
+    }
+    char cpath[160];
+    if (sscanf(cmd, "capture %159s", cpath) == 1) {
+        /* The DISPLAYED container, header row and all -- what the wire
+         * is carrying, which is what a capture is for. Take it while
+         * paused and it is a whole frame by construction: the sensor is
+         * writing the scratch buffer, so nothing is racing this copy.
+         * Unpaused it would tear, because the next frame starts the
+         * instant the last one lands. */
+        if (!bstate.payload_map) {
+            snprintf(reply, cap, "err no payload buffer yet");
+            return;
+        }
+        FILE *f = fopen(cpath, "wb");
+        if (!f) {
+            snprintf(reply, cap, "err %s: %s", cpath, strerror(errno));
+            return;
+        }
+        int ok = fwrite(base_map_ro, 1, (size_t)WIDTH * 3, f) ==
+                 (size_t)WIDTH * 3;
+        for (uint32_t r = 0; ok && r < HEIGHT; r++)
+            ok = fwrite(bstate.payload_map + (size_t)r * bstate.payload_pitch,
+                        1, (size_t)WIDTH * 3, f) == (size_t)WIDTH * 3;
+        fclose(f);
+        if (!ok) {
+            snprintf(reply, cap, "err %s: short write", cpath);
+            return;
+        }
+        snprintf(reply, cap, "ok %s %u %u %s", cpath, WIDTH, VDISP,
+                 paused ? "steady" : "live");
         return;
     }
     if (!strcmp(cmd, "preview")) {
@@ -1106,6 +1138,7 @@ int main(int argc, char **argv) {
         bstate.vblank = vblank_cmd;
         bstate.sensor_fd = sfd;
         bstate.started = t0;
+        base_map_ro = base.map;
         bstate.payload_map = pay.map;
         bstate.payload_pitch = pay.pitch;
         struct bridge_frame bf = {
