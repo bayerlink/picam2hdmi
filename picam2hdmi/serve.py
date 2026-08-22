@@ -391,11 +391,15 @@ class Supervisor:
         desired = self.stored_spec()
         if not desired or desired.get("source", "off") == "off":
             return False
-        # A live camera is the BRIDGE's intent to satisfy, never this
-        # daemon's: reviving it here would open the sensor the bridge is
-        # mid-stream on and take its frames away, which is precisely how
-        # the picture died on 2026-08-22.
-        if desired.get("source") == "camera":
+        # While a bridge runs it owns the bench -- the sensor AND the
+        # display -- and this daemon is a controller, never an engine.
+        # Reviving an intent here would reach for hardware the bridge
+        # holds: the camera, whose frames it would steal, or the
+        # display, which answers EACCES. Both were happening on a five
+        # second timer, and the second one kept re-creating the very
+        # PermissionError the panel was showing, so a working bench
+        # read as a broken one no matter what was clicked.
+        if _bridge_running():
             return False
         if self._thread is not None and self._thread.is_alive():
             return False
