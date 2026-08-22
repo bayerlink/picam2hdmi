@@ -23,6 +23,7 @@ turns it into a non-event.
 from __future__ import annotations
 
 import ctypes
+import errno
 import fcntl
 import mmap as _mmap
 import os
@@ -327,7 +328,22 @@ class Card:
         raise RuntimeError(f"no usable DRM device among {candidates}: {last}")
 
     def _ioctl(self, request: int, arg) -> None:
-        fcntl.ioctl(self.fd, request, arg)
+        try:
+            fcntl.ioctl(self.fd, request, arg)
+        except PermissionError as error:
+            # EACCES from a DRM ioctl means one thing in practice: another
+            # process is DRM master and this one is not. It is NOT a file
+            # permission -- the device opened moments ago -- so the bare
+            # "Permission denied" sends a reader to chmod and sudo, which
+            # cannot help. Say who actually has the display.
+            raise PermissionError(
+                errno.EACCES,
+                f"{self.path}: another process holds DRM master, so this "
+                "one cannot set a mode. Only one program may drive the "
+                "display at a time -- on a bridge bench that is the "
+                "genlocked camera bridge (systemctl stop bridge to take "
+                "the display, systemctl start bridge to give it back)."
+            ) from error
 
     def close(self) -> None:
         """Release the device -- and with it, DRM master.
