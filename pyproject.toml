@@ -25,7 +25,10 @@ dependencies = [
     # The wire format. Lives in the protocol's own repository so every
     # encoder and receiver conforms to one spec; this tool re-exports its
     # codec and adds only what is the Pi's.
-    "bayerlink>=0.3.0",
+    # 0.4.0 is the floor, not a preference: this package imports
+    # source_id_for and encode_packed, neither of which exists in
+    # 0.3.0 -- an older bayerlink cannot import at all.
+    "bayerlink>=0.4.0",
 ]
 
 [project.optional-dependencies]
