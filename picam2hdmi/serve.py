@@ -900,12 +900,18 @@ def _handler(supervisor: Supervisor):
                 # holds the sensor and the display and keeps the picture
                 # alive whether or not this daemon is running. The panel
                 # does not stream alongside it -- it drives it.
+                # A stopped bridge is a STATE, not a failure to answer:
+                # with no source selected it is exactly what should be
+                # true. Reporting it as an HTTP error made "nothing is
+                # streaming" read as a fault, errno and all.
                 try:
                     r = _bridge_command("bridge status")
-                except OSError as error:
-                    return self._send(503, {
-                        "error": f"the bridge is not running, or its "
-                                 f"control socket is unreachable: {error}"})
+                except OSError:
+                    return self._send(200, {
+                        "running": False,
+                        # Active but silent means it is still building,
+                        # opening the sensor and reaching its loop.
+                        "starting": _bridge_owns_bench()})
                 if not r.startswith("ok"):
                     return self._send(400, {"error": r})
                 fields = {}
@@ -915,6 +921,7 @@ def _handler(supervisor: Supervisor):
                         fields[key] = float(value) if "." in value else int(value)
                     except ValueError:
                         fields[key] = value
+                fields["running"] = True
                 return self._send(200, fields)
             if self.path == "/bridge/preview.png":
                 # What the SENSOR is writing, decimated by the bridge --

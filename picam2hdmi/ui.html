@@ -736,11 +736,25 @@ async function bridgePoll() {
   let st;
   try { st = await api('GET', '/bridge/status'); }
   catch (x) {
-    $('bridgestate').textContent = 'not running — ' + x.message;
+    $('bridgestate').textContent = 'unreachable — ' + x.message;
+    $('bridgestate').style.color = '#f85149';
     $('bridgesensor').textContent = '';
     bridgeSeq = null;
     return;
   }
+  if (!st.running) {
+    // Stopped on purpose is the ordinary state of a bench with no
+    // source selected, and it should read like one.
+    $('bridgestate').textContent = st.starting
+      ? 'starting…' : 'stopped — no source is selected';
+    $('bridgestate').style.color = '#8b949e';
+    $('bridgesensor').textContent = '';
+    $('bpause').hidden = true;
+    $('bridgeprev').hidden = true;
+    bridgeSeq = null;
+    return;
+  }
+  $('bpause').hidden = false;
   const now = Date.now() / 1000;
   let fps = '';
   if (bridgeSeq !== null && now > bridgeAt)
