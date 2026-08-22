@@ -86,9 +86,6 @@
   #cropinfo b { color: #e6edf3; font-weight: 600; }
   #budget.bad { color: #f85149; }
   #budget.ok { color: #3fb950; }
-  #preview { width: 100%; image-rendering: pixelated; background: #000;
-             border-radius: 6px; min-height: 6rem; margin-top: .4rem; }
-  #previewcap { color: #8b949e; font-size: .85rem; }
   table { width: 100%; border-collapse: collapse; }
   td { padding: .3rem .4rem; border-top: 1px solid #21262d; }
   td.name { font-family: ui-monospace, monospace; word-break: break-all; }
@@ -169,12 +166,6 @@
     </span>
     <button onclick="captureFrame()">Capture</button>
   </div>
-
-  <section class="below" id="emitwrap">
-    <h2>Emitting now</h2>
-    <img id="preview" alt="nothing streaming">
-    <div id="previewcap"></div>
-  </section>
 
   <section class="below" id="bridgewrap">
     <h2>Bridge</h2>
@@ -322,7 +313,6 @@ function fetchCameras() {
 
 function setSource(spec) {
   err('');
-  pinned = false;
   api('PUT', '/source', spec).then(refresh).catch(e => err(e.message));
 }
 
@@ -557,7 +547,6 @@ function applyCamera() {
   if ($('cgain').value !== '') spec.gain = +$('cgain').value;
   else delete spec.gain;
   err('');
-  pinned = false;
   api('PUT', '/source', spec).then(refresh).catch(e => {
     err(e.message);
     // A refused change must not linger ANYWHERE on the panel: snap the
@@ -580,7 +569,6 @@ function applyCamera() {
 
 let lastSpec = '';
 let followed = '';
-let pinned = false;   // a spool preview holds the section open
 
 function followWire(src) {
   // The panel MIRRORS the instrument -- always, not just at load. The
@@ -657,9 +645,7 @@ async function refresh() {
 
   // A running camera streams INTO the editor: the emitted window's
   // image, painted at the emitted window's place. Preloaded, so the
-  // poll never paints a half-loaded image. The separate emitting-now
-  // view would duplicate it, so it steps aside while the camera runs.
-  $('emitwrap').style.display = (live && !pinned) ? 'none' : '';
+  // poll never paints a half-loaded image.
   const modeMatches = live && (src.cam_mode || [sensor.w, sensor.h])
                         .join('x') === $('cmode').value;
   if (modeMatches) {
@@ -674,16 +660,6 @@ async function refresh() {
   } else if (wire) {
     wire = null;
     drawCrop();
-  }
-  if (!live && specNow !== lastSpec) {
-    lastSpec = specNow;
-    $('preview').src = s.running ? '/preview.stream' : '';
-    $('previewcap').textContent = s.running ?
-      'decoded raw samples of the emitted container, live' : 'nothing streaming';
-  }
-  if (live && !pinned && $('preview').getAttribute('src')) {
-    $('preview').removeAttribute('src');   // one stream at a time
-    lastSpec = '';
   }
   spool = s.spool;
   renderSources();
