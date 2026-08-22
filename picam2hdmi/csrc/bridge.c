@@ -749,6 +749,13 @@ static double to_mono(double ts, int *bad) {
 
 int main(int argc, char **argv) {
     int exposure = 1000, gain = 200, seconds = 0, margin_lines = 10;
+    /* A mode change is a RESTART, deliberately: the whole setup path
+     * recomputes the line lock from the sensor's pixel rate and the new
+     * geometry, and doing that live would mean redoing by hand what
+     * start-up already does correctly. The frame need only fit the
+     * raster -- it sits inside it, and the header tells the receiver
+     * the truth. */
+    unsigned want_w = 0, want_h = 0;
     int test_pattern = 0, selftest = 0;
     const char *video = "/dev/video2", *subdev = "/dev/v4l-subdev0";
     for (int i = 1; i < argc; i++) {
@@ -764,6 +771,12 @@ int main(int argc, char **argv) {
             for (k = 0; k < 4 && strcmp(o, ORDERS[k].name); k++) ;
             if (k == 4) { fprintf(stderr, "unknown order %s\n", o); return 2; }
             bl_fourcc = ORDERS[k].fourcc;
+        }
+        else if (!strcmp(argv[i], "--mode")) {
+            if (sscanf(argv[++i], "%ux%u", &want_w, &want_h) != 2) {
+                fprintf(stderr, "bridge: --mode wants WxH, e.g. 1296x972\n");
+                return 1;
+            }
         }
         else if (!strcmp(argv[i], "--video")) video = argv[++i];
         else if (!strcmp(argv[i], "--subdev")) subdev = argv[++i];
@@ -866,7 +879,8 @@ int main(int argc, char **argv) {
     if (sfd < 0) die("open subdev");
     struct v4l2_subdev_format sf = {
         .which = V4L2_SUBDEV_FORMAT_ACTIVE, .pad = 0,
-        .format = {.width = WIDTH, .height = HEIGHT,
+        .format = {.width = want_w ? want_w : WIDTH,
+                   .height = want_h ? want_h : HEIGHT,
                    .code = MEDIA_BUS_FMT_SGBRG10_1X10,
                    .field = V4L2_FIELD_NONE}};
     if (ioctl(sfd, VIDIOC_SUBDEV_S_FMT, &sf) < 0) die("SUBDEV_S_FMT");

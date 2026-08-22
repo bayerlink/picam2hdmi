@@ -17,7 +17,11 @@ Description=bayerlink camera bridge (sensor-genlocked HDMI source)
 After=multi-user.target
 
 [Service]
-ExecStart=/usr/local/bin/picam2hdmi bridge --gain 200
+# BRIDGE_ARGS carries a requested sensor mode (--mode WxH). It lives in
+# /run, so it is a SESSION choice: a reboot returns to the sensor's
+# default, which is the mode a bench should come back in.
+EnvironmentFile=-/run/bridge.env
+ExecStart=/usr/local/bin/picam2hdmi bridge --gain 200 $BRIDGE_ARGS
 Restart=always
 RestartSec=2
 # KMS master and V4L2 subdev access need root on a stock Pi OS Lite.

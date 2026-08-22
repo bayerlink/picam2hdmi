@@ -257,15 +257,18 @@ function showCards() {
  * nothing says why. */
 function cameraControlsFor(owner) {
   const fixed = owner === 'bridge';
-  for (const id of ['cmode', 'cexp', 'cgain'])
+  // The MODE is changeable -- it restarts the bridge, which is the
+  // agreed price of new geometry. Exposure and gain are not: they
+  // belong to the loop while it is streaming.
+  for (const id of ['cexp', 'cgain'])
     if ($(id)) $(id).disabled = fixed;
   const note = $('camfixed');
   if (!note) return;
   note.hidden = !fixed;
   note.textContent = fixed
     ? 'The bridge owns this sensor and drives exposure and gain from its '
-      + 'own loop, so these do not apply while it is streaming. The mode '
-      + 'shown is the one it is actually sending.'
+      + 'own loop, so those do not apply while it is streaming. Changing '
+      + 'the mode restarts it, and the picture drops for a moment.'
     : '';
 }
 

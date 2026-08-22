@@ -1144,8 +1144,36 @@ def _handler(supervisor: Supervisor):
                         # not quietly dropped. Accepting a mode change
                         # and then not changing the mode is the worst of
                         # the three possible answers.
-                        ignored = [k for k in ("cam_mode", "crop",
-                                               "exposure_us", "gain")
+                        # A MODE change is a restart, by design: the
+                        # whole start-up path recomputes the line lock
+                        # from the sensor's pixel rate and the new
+                        # geometry. The frame need only fit the raster;
+                        # it sits inside it and the header carries the
+                        # truth. Disturbing the picture is the agreed
+                        # price of changing geometry.
+                        mode = spec.get("cam_mode")
+                        if mode and len(mode) == 2:
+                            want = f"{int(mode[0])}x{int(mode[1])}"
+                            now = ""
+                            try:
+                                r = _bridge_command("bridge status")
+                                fields = dict(
+                                    t.split("=", 1) for t in r[3:].split()
+                                    if "=" in t)
+                                now = f"{fields.get('width')}x{fields.get('height')}"
+                            except OSError:
+                                pass
+                            if want != now:
+                                Path("/run/bridge.env").write_text(
+                                    f"BRIDGE_ARGS=--mode {want}\n")
+                                _bridge_service("restart")
+                                if not _bridge_up():
+                                    return self._send(503, {
+                                        "error": f"the bridge did not come "
+                                                 f"back after asking for "
+                                                 f"{want}; the sensor may "
+                                                 "not offer that mode"})
+                        ignored = [k for k in ("crop", "exposure_us", "gain")
                                    if spec.get(k) is not None]
                         supervisor.stop()
                         _bridge_command("bridge source sensor")
