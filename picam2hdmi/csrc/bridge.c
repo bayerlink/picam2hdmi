@@ -80,32 +80,99 @@ static uint32_t HEIGHT = RASTER_H;
  * demosaic; they are NO ORACLE for the mosaic phase of real light.
  * The only parity witness is a real scene through the real filters.
  * (Transport row-exactness was proven separately, 2026-08-12.) */
-static const struct { const char *name; uint32_t fourcc; } ORDERS[] = {
-    {"GBRG", 0x41414770u},             /* 'pGAA' */
-    {"RGGB", 0x41415270u},             /* 'pRAA' */
-    {"BGGR", 0x41414270u},             /* 'pBAA' */
-    {"GRBG", 0x41416770u},             /* 'pgAA' */
+/* ONE row per format, three vocabularies as columns.
+ *
+ * The same format has three names: the kernel's mediabus code (what the
+ * sensor reports), the V4L2 pixelformat (what unicam must deliver), and
+ * bayerlink's fourcc (what the receiver is told to unpack). Three names
+ * are inherent -- three separate tables were not, and the two that
+ * existed had already drifted apart in depth coverage.
+ *
+ * The bayerlink column is NOT typed from memory: it is what
+ * bayerlink.protocol.fourcc_for() returns, and --selftest re-proves it
+ * against that codec at every start-up. Note the 8-bit row for BGGR is
+ * 'BA81' where its siblings are plain order strings -- a V4L2 heirloom,
+ * and exactly the kind of irregularity that gets guessed wrong once. */
+static const struct {
+    const char *order;
+    int bits;
+    uint32_t mbus, v4l2, bayerlink;
+} FORMATS[] = {
+    {"RGGB",  8, MEDIA_BUS_FMT_SRGGB8_1X8,   V4L2_PIX_FMT_SRGGB8,
+     v4l2_fourcc('R', 'G', 'G', 'B')},
+    {"GRBG",  8, MEDIA_BUS_FMT_SGRBG8_1X8,   V4L2_PIX_FMT_SGRBG8,
+     v4l2_fourcc('G', 'R', 'B', 'G')},
+    {"GBRG",  8, MEDIA_BUS_FMT_SGBRG8_1X8,   V4L2_PIX_FMT_SGBRG8,
+     v4l2_fourcc('G', 'B', 'R', 'G')},
+    {"BGGR",  8, MEDIA_BUS_FMT_SBGGR8_1X8,   V4L2_PIX_FMT_SBGGR8,
+     v4l2_fourcc('B', 'A', '8', '1')},
+    {"RGGB", 10, MEDIA_BUS_FMT_SRGGB10_1X10, V4L2_PIX_FMT_SRGGB10P,
+     v4l2_fourcc('p', 'R', 'A', 'A')},
+    {"GRBG", 10, MEDIA_BUS_FMT_SGRBG10_1X10, V4L2_PIX_FMT_SGRBG10P,
+     v4l2_fourcc('p', 'g', 'A', 'A')},
+    {"GBRG", 10, MEDIA_BUS_FMT_SGBRG10_1X10, V4L2_PIX_FMT_SGBRG10P,
+     v4l2_fourcc('p', 'G', 'A', 'A')},
+    {"BGGR", 10, MEDIA_BUS_FMT_SBGGR10_1X10, V4L2_PIX_FMT_SBGGR10P,
+     v4l2_fourcc('p', 'B', 'A', 'A')},
+    {"RGGB", 12, MEDIA_BUS_FMT_SRGGB12_1X12, V4L2_PIX_FMT_SRGGB12P,
+     v4l2_fourcc('p', 'R', 'C', 'C')},
+    {"GRBG", 12, MEDIA_BUS_FMT_SGRBG12_1X12, V4L2_PIX_FMT_SGRBG12P,
+     v4l2_fourcc('p', 'g', 'C', 'C')},
+    {"GBRG", 12, MEDIA_BUS_FMT_SGBRG12_1X12, V4L2_PIX_FMT_SGBRG12P,
+     v4l2_fourcc('p', 'G', 'C', 'C')},
+    {"BGGR", 12, MEDIA_BUS_FMT_SBGGR12_1X12, V4L2_PIX_FMT_SBGGR12P,
+     v4l2_fourcc('p', 'B', 'C', 'C')},
 };
+
+/* The row in force: set by discovery, overridden by --order, and the
+ * single place the three names are read from. */
+static int fmt_row = 6;                     /* GBRG 10-bit, this bench */
+
+/* The mosaic order after a CROP.
+ *
+ * A crop moves the origin, so an odd offset flips that axis's parity
+ * and the mosaic appears shifted: crop one column into an RGGB array
+ * and the first pixel is G, on a GRBG lattice. bayerlink states the
+ * order as two bits -- bit 1 the row parity of R, bit 0 the column
+ * parity -- which makes the whole rule an XOR rather than a table of
+ * sixteen cases.
+ *
+ * This is the fact that made a 1080p crop of a BGGR array report GBRG
+ * and look, for one expensive morning, like a broken sensor. Written
+ * once, here, over the same rows everything else reads. */
+static int order_phase(const char *order) {
+    if (!strcmp(order, "RGGB")) return 0;
+    if (!strcmp(order, "GRBG")) return 1;
+    if (!strcmp(order, "GBRG")) return 2;
+    return 3;                                 /* BGGR */
+}
+
+static int format_after_crop(int row, unsigned x0, unsigned y0) {
+    int phase = order_phase(FORMATS[row].order)
+                ^ (int)((y0 & 1u) << 1) ^ (int)(x0 & 1u);
+    for (unsigned i = 0; i < sizeof FORMATS / sizeof *FORMATS; i++)
+        if (FORMATS[i].bits == FORMATS[row].bits &&
+            order_phase(FORMATS[i].order) == phase)
+            return (int)i;
+    return row;                               /* unreachable: 4 per depth */
+}
+
+static int format_row(const char *order, int bits) {
+    for (unsigned i = 0; i < sizeof FORMATS / sizeof *FORMATS; i++)
+        if (FORMATS[i].bits == bits && !strcmp(FORMATS[i].order, order))
+            return (int)i;
+    return -1;
+}
 static int order_given;                     /* --order beats discovery */
-static uint32_t bl_fourcc = 0x41414770u;    /* GBRG: the driver was
-                                             * right; see above */
+/* What the header stamps: the bayerlink column of the row in force.
+ * A function, not a variable, so it cannot be set once and then
+ * disagree with the format actually being captured. */
+#define bl_fourcc (FORMATS[fmt_row].bayerlink)
 /* The table above is the 10-bit family, which is what this link has
  * ever carried. A sensor reporting another depth is not silently
  * relabelled as ten -- the fourcc is the receiver's ONLY statement of
  * how to unpack, so a wrong one is unreadable data that looks like a
  * broken picture. */
-static uint32_t fourcc_for_order(const char *order, int bits) {
-    if (bits != 10) {
-        fprintf(stderr, "bridge: sensor is %d-bit; this build only stamps "
-                "the 10-bit fourccs, so the header would misdescribe the "
-                "payload. Keeping the compiled default.\n", bits);
-        return bl_fourcc;
-    }
-    for (unsigned i = 0; i < sizeof ORDERS / sizeof *ORDERS; i++)
-        if (!strcmp(ORDERS[i].name, order))
-            return ORDERS[i].fourcc;
-    return bl_fourcc;
-}
 
 /* source_id indexes the SOURCES on this device -- 0 here, because
  * there is one sensor. It is not an identity: two cameras of the same
@@ -685,26 +752,16 @@ static void set_ctrl(int fd, uint32_t id, int32_t value, const char *name) {
  * Returns 0 and leaves everything untouched if the subdev will not
  * answer -- an older kernel, an unusual driver -- so a bridge that
  * cannot ask still runs on the numbers it was built with. */
-static int discover_sensor(int sfd, uint32_t *w, uint32_t *h,
-                           const char **order, int *bits) {
+static int discover_sensor(int sfd, uint32_t *w, uint32_t *h, int *row) {
     struct v4l2_subdev_format f = {.which = V4L2_SUBDEV_FORMAT_ACTIVE,
                                    .pad = 0};
     if (ioctl(sfd, VIDIOC_SUBDEV_G_FMT, &f) < 0)
         return 0;
-    static const struct { uint32_t code; const char *order; int bits; } CODES[] = {
-        {MEDIA_BUS_FMT_SRGGB8_1X8,  "RGGB",  8}, {MEDIA_BUS_FMT_SGRBG8_1X8,  "GRBG",  8},
-        {MEDIA_BUS_FMT_SGBRG8_1X8,  "GBRG",  8}, {MEDIA_BUS_FMT_SBGGR8_1X8,  "BGGR",  8},
-        {MEDIA_BUS_FMT_SRGGB10_1X10,"RGGB", 10}, {MEDIA_BUS_FMT_SGRBG10_1X10,"GRBG", 10},
-        {MEDIA_BUS_FMT_SGBRG10_1X10,"GBRG", 10}, {MEDIA_BUS_FMT_SBGGR10_1X10,"BGGR", 10},
-        {MEDIA_BUS_FMT_SRGGB12_1X12,"RGGB", 12}, {MEDIA_BUS_FMT_SGRBG12_1X12,"GRBG", 12},
-        {MEDIA_BUS_FMT_SGBRG12_1X12,"GBRG", 12}, {MEDIA_BUS_FMT_SBGGR12_1X12,"BGGR", 12},
-    };
-    for (unsigned i = 0; i < sizeof CODES / sizeof *CODES; i++)
-        if (CODES[i].code == f.format.code) {
+    for (unsigned i = 0; i < sizeof FORMATS / sizeof *FORMATS; i++)
+        if (FORMATS[i].mbus == f.format.code) {
             *w = f.format.width;
             *h = f.format.height;
-            *order = CODES[i].order;
-            *bits = CODES[i].bits;
+            *row = (int)i;
             return 1;
         }
     fprintf(stderr, "bridge: sensor reports mediabus code 0x%04x, which "
@@ -756,6 +813,7 @@ int main(int argc, char **argv) {
      * raster -- it sits inside it, and the header tells the receiver
      * the truth. */
     unsigned want_w = 0, want_h = 0;
+    const char *want_order = NULL;
     int test_pattern = 0, selftest = 0;
     const char *video = "/dev/video2", *subdev = "/dev/v4l-subdev0";
     for (int i = 1; i < argc; i++) {
@@ -767,10 +825,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--test-pattern")) test_pattern = 1;
         else if (!strcmp(argv[i], "--order")) {
             order_given = 1;
-            const char *o = argv[++i]; size_t k;
-            for (k = 0; k < 4 && strcmp(o, ORDERS[k].name); k++) ;
-            if (k == 4) { fprintf(stderr, "unknown order %s\n", o); return 2; }
-            bl_fourcc = ORDERS[k].fourcc;
+            want_order = argv[++i];
         }
         else if (!strcmp(argv[i], "--mode")) {
             if (sscanf(argv[++i], "%ux%u", &want_w, &want_h) != 2) {
@@ -796,6 +851,20 @@ int main(int argc, char **argv) {
             for (int b = 0; b < 48; b++) printf("%02x", h[b]);
             printf("\n");
         }
+        /* Every row's bayerlink fourcc, and every crop shift, checked
+         * against the codec that defines them -- the table is proven
+         * rather than believed. */
+        for (unsigned i = 0; i < sizeof FORMATS / sizeof *FORMATS; i++)
+            printf("fmt %s %d %c%c%c%c\n", FORMATS[i].order, FORMATS[i].bits,
+                   (char)(FORMATS[i].bayerlink & 0xff),
+                   (char)((FORMATS[i].bayerlink >> 8) & 0xff),
+                   (char)((FORMATS[i].bayerlink >> 16) & 0xff),
+                   (char)((FORMATS[i].bayerlink >> 24) & 0xff));
+        for (unsigned i = 0; i < sizeof FORMATS / sizeof *FORMATS; i++)
+            for (unsigned dy = 0; dy < 2; dy++)
+                for (unsigned dx = 0; dx < 2; dx++)
+                    printf("crop %s %u %u %s\n", FORMATS[i].order, dx, dy,
+                           FORMATS[format_after_crop((int)i, dx, dy)].order);
         return 0;
     }
 
@@ -881,7 +950,7 @@ int main(int argc, char **argv) {
         .which = V4L2_SUBDEV_FORMAT_ACTIVE, .pad = 0,
         .format = {.width = want_w ? want_w : WIDTH,
                    .height = want_h ? want_h : HEIGHT,
-                   .code = MEDIA_BUS_FMT_SGBRG10_1X10,
+                   .code = FORMATS[fmt_row].mbus,
                    .field = V4L2_FIELD_NONE}};
     if (ioctl(sfd, VIDIOC_SUBDEV_S_FMT, &sf) < 0) die("SUBDEV_S_FMT");
 
@@ -894,9 +963,8 @@ int main(int argc, char **argv) {
      * for. */
     {
         uint32_t dw = WIDTH, dh = HEIGHT;
-        const char *dorder = NULL;
-        int dbits = 0;
-        if (discover_sensor(sfd, &dw, &dh, &dorder, &dbits)) {
+        int drow = fmt_row;
+        if (discover_sensor(sfd, &dw, &dh, &drow)) {
             if (dw > RASTER_W || dh + 1 > VDISP) {
                 fprintf(stderr, "bridge: the sensor is sending %ux%u, which "
                         "does not fit the %ux%u raster this link "
@@ -906,10 +974,23 @@ int main(int argc, char **argv) {
             }
             WIDTH = dw;
             HEIGHT = dh;
-            if (!order_given)
-                bl_fourcc = fourcc_for_order(dorder, dbits);
+            /* The row settles all three names at once: what unicam is
+             * asked to deliver, and what the header tells the receiver
+             * to unpack. An explicit --order still wins, but only the
+             * ORDER -- the depth is the sensor's to state. */
+            if (order_given && want_order) {
+                int r = format_row(want_order, FORMATS[drow].bits);
+                if (r < 0) {
+                    fprintf(stderr, "bridge: no %s format at %d bits\n",
+                            want_order, FORMATS[drow].bits);
+                    return 1;
+                }
+                fmt_row = r;
+            } else {
+                fmt_row = drow;
+            }
             printf("bridge: sensor says %ux%u %s %d-bit%s\n", WIDTH, HEIGHT,
-                   dorder, dbits,
+                   FORMATS[fmt_row].order, FORMATS[fmt_row].bits,
                    order_given ? " (order overridden on the command line)"
                                : "");
         }
@@ -950,7 +1031,7 @@ int main(int argc, char **argv) {
     if (vfd < 0) die("open video");
     struct v4l2_format fmt = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
     fmt.fmt.pix.width = WIDTH; fmt.fmt.pix.height = HEIGHT;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_SGBRG10P;
+    fmt.fmt.pix.pixelformat = FORMATS[fmt_row].v4l2;
     fmt.fmt.pix.field = V4L2_FIELD_NONE;
     fmt.fmt.pix.bytesperline = pay.pitch;
     if (ioctl(vfd, VIDIOC_S_FMT, &fmt) < 0) die("S_FMT");

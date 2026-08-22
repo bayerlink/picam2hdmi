@@ -68,11 +68,35 @@ def ensure_built(rebuild: bool = False) -> Path:
 
 
 def check(binary: Path) -> bool:
-    """The twin discipline: C and Python headers byte-identical."""
-    from bayerlink.protocol import Header, fourcc_for
-    got = subprocess.run([str(binary), "--selftest", "--order", "GBRG"],
-                         capture_output=True, text=True).stdout.split()
+    """The twin discipline: the C copy is verified against the codec that
+    owns these facts, never trusted.
+
+    Three claims, all proven here at every start-up: the header bytes
+    match Python's, every row of the format table carries the fourcc
+    bayerlink says it should, and the crop rule -- an odd offset flips
+    that axis's Bayer parity -- agrees with bayerlink's phase bits. A
+    wrong row is a header that misdescribes its payload, and that reads
+    at the far end as a broken picture rather than a broken table.
+    """
+    from bayerlink.protocol import BAYER_PHASE, Header, fourcc_for
+
+    out = subprocess.run([str(binary), "--selftest", "--order", "GBRG"],
+                         capture_output=True, text=True).stdout.splitlines()
+    headers = [l for l in out if not l.startswith(("fmt ", "crop "))]
     fc = fourcc_for("GBRG", 10)
     want = [Header(fourcc=fc, width=1920, height=1080, frame_seq=s,
                    source_id=0).pack().hex() for s in (7, 0, 123456)]
-    return got == want
+    if headers != want:
+        return False
+
+    for line in (l for l in out if l.startswith("fmt ")):
+        _, order, bits, stamped = line.split()
+        if stamped != fourcc_for(order, int(bits)):
+            return False
+
+    by_phase = {phase: order for order, phase in BAYER_PHASE.items()}
+    for line in (l for l in out if l.startswith("crop ")):
+        _, order, dx, dy, after = line.split()
+        if after != by_phase[BAYER_PHASE[order] ^ (int(dy) << 1) ^ int(dx)]:
+            return False
+    return True
