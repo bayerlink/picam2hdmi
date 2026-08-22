@@ -263,9 +263,9 @@ function cameraControlsFor(owner) {
   if (!note) return;
   note.hidden = !fixed;
   note.textContent = fixed
-    ? 'The bridge is streaming this sensor at the geometry it was built '
-      + 'for (1920x1080), and drives exposure and gain from its own loop. '
-      + 'These do not apply while it owns the bench.'
+    ? 'The bridge owns this sensor and drives exposure and gain from its '
+      + 'own loop, so these do not apply while it is streaming. The mode '
+      + 'shown is the one it is actually sending.'
     : '';
 }
 
@@ -755,6 +755,21 @@ async function bridgePoll() {
   // writer of one fact. Read-only is also the safe answer for exposure,
   // which the sensor may absorb by stretching the frame -- the very
   // knob the genlock steers.
+  // The mode selector shows what the BRIDGE is streaming, not what was
+  // last requested of this daemon: a dropdown reading 1296x972 over a
+  // 1920x1080 picture is the panel telling a plain untruth.
+  if (st.width && st.height) {
+    const real = st.width + 'x' + st.height;
+    const sel = $('cmode');
+    if (sel && sel.value !== real) {
+      if (![...sel.options].some(o => o.value === real)) {
+        const o = document.createElement('option');
+        o.value = o.textContent = real;
+        sel.insertBefore(o, sel.firstChild);
+      }
+      sel.value = real;
+    }
+  }
   $('bridgesensor').textContent =
     'exposure ' + st.exposure + ' lines, gain ' + st.gain +
     ' (' + (st.gain / 16).toFixed(2) + 'x)';

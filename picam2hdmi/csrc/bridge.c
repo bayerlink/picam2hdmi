@@ -361,10 +361,10 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
         }
         snprintf(reply, cap,
                  "ok seq=%u locked=%d paused=%d source=%s "
-                 "phase=%.2f margin=%.0f "
+                 "width=%u height=%u phase=%.2f margin=%.0f "
                  "vblank=%d uptime=%ld exposure=%d gain=%d",
                  bstate.seq, bstate.locked, paused,
-                 clip_map ? "clip" : "sensor", bstate.phase,
+                 clip_map ? "clip" : "sensor", WIDTH, HEIGHT, bstate.phase,
                  bstate.margin,
                  bstate.vblank,
                  bstate.started ? (long)(time(NULL) - bstate.started) : 0L,
