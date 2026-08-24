@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 # picam2hdmi on-Pi installer: packages, tool, instrument unit.
 # Run as root on Raspberry Pi OS Lite (Bookworm or later):
 #   curl -fsSL https://raw.githubusercontent.com/bayerlink/picam2hdmi/main/contrib/install.sh | sudo bash

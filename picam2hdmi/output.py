@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Scanout: bayerlink containers onto the HDMI connector, double-buffered.
 
 The kms module owns the DRM mechanics; this one owns the bayerlink shape of

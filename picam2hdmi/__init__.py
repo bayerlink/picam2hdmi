@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """picam2hdmi -- a Raspberry Pi camera as a bayerlink HDMI source.
 
 The wire format is the bayerlink protocol (github.com/bayerlink/bayerlink);

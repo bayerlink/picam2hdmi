@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 # The bridge is rebuilt ON DEVICE from this directory: bridge.c plus
 # every module in modules/ (AE and friends -- see bridge.h for the
 # hook contract). `picam2hdmi bridge` drives the same build through

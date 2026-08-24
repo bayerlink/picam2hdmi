@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Command line: `pattern` works anywhere; `stream` and `serve` need a Pi."""
 from __future__ import annotations
 

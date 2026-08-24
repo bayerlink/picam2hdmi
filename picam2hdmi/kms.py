@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """DRM/KMS via raw ioctls: mode setting, dumb buffers, vsync page flips.
 
 ctypes against /dev/dri directly, no bindings package: an appliance should

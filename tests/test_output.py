@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The off-target half of scanout: everything that does not need a Pi.
 
 The ioctl path is proven on hardware in phase 0; these tests pin what CAN

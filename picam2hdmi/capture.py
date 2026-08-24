@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Capture: raw Bayer frames from the camera, via the Linux camera stack.
 
 Picamera2 (libcamera), raw stream only. The ISP is NOT in the loop: the

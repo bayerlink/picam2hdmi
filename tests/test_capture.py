@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The camera source's pure logic, off-target: no Pi, no camera needed."""
 from __future__ import annotations
 
