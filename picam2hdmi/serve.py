@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The source as a bench instrument: a control daemon over HTTP.
 
 Lab instruments have always had control ports; HTTP + JSON is today's
@@ -388,6 +390,15 @@ class Supervisor:
         if self._thread is not None and self._thread.is_alive():
             return False
         try:
+            # The bridge first, exactly as the HTTP route would choose:
+            # an intent realised here must reach the same engine as the
+            # same intent clicked in the panel, or this daemon takes a
+            # display the bridge is about to need.
+            drawn = route_to_bridge(desired, self.spool)
+            if drawn:
+                self.stop()
+                self.last_error = ""
+                return True
             self.start(desired)
             return True
         except Exception as error:            # noqa: BLE001 -- kept as status
@@ -625,6 +636,44 @@ def _bridge_service(action: str) -> bool:
 
 
 CLIP_PATH = "/run/bridge-clip.raw"
+
+
+def route_to_bridge(spec: dict, spool: Path) -> str | None:
+    """Hand a source to the bridge if the bridge is its engine.
+
+    Returns what the bridge was asked to draw, or None if this source is
+    not the bridge's to draw -- patterns, and anything at all on a
+    machine that has no bridge. Raises ValueError with the reason when
+    the bridge should have taken it and could not.
+
+    ONE place decides which engine draws a source, because there were
+    two: the HTTP route chose correctly, and the keeper -- realising the
+    SAME stored intent, unattended -- called this daemon's own engine
+    directly. So a recording a person selected was drawn by the bridge,
+    and the identical recording revived hours later was drawn here,
+    taking the display and leaving the bridge unable to modeset. The
+    symptom was a sensor that would not stream in any mode; the cause
+    was a second copy of a decision.
+    """
+    wanted = spec.get("source")
+    if wanted not in ("camera", "file") or not _bridge_up():
+        return None
+    if wanted == "camera":
+        reply = _bridge_command("bridge source sensor")
+        if not reply.startswith("ok"):
+            raise ValueError(reply)
+        return "sensor"
+    name = str(spec.get("file", ""))
+    path = spool / name
+    if path.name != name or not name.endswith(".npy"):
+        raise ValueError(f"recording name {name!r} is not a plain <name>.npy")
+    if not path.exists():
+        raise ValueError(f"no recording {name!r}")
+    info = _prepare_clip(path)
+    reply = _bridge_command(f"bridge source clip {CLIP_PATH}")
+    if not reply.startswith("ok"):
+        raise ValueError(reply)
+    return f"clip {name} ({info.get('frames', '?')} frames)"
 
 
 def _prepare_clip(path: Path) -> dict:
@@ -1176,7 +1225,11 @@ def _handler(supervisor: Supervisor):
                         ignored = [k for k in ("crop", "exposure_us", "gain")
                                    if spec.get(k) is not None]
                         supervisor.stop()
-                        _bridge_command("bridge source sensor")
+                        try:
+                            route_to_bridge({"source": "camera"},
+                                            supervisor.spool)
+                        except ValueError as error:
+                            return self._send(400, {"error": str(error)})
                         supervisor._persist_intent({"source": "camera"})
                         status = supervisor.status()
                         if ignored:
@@ -1192,23 +1245,21 @@ def _handler(supervisor: Supervisor):
                         # same buffer the sensor would have written, so
                         # the raster, the header and the lock are the
                         # ones already running. This daemon never takes
-                        # the display.
-                        clip = self._spool_name(spec["file"])
-                        if clip is None or not clip.exists():
-                            return self._send(404, {
-                                "error": f"no recording {spec['file']!r}"})
+                        # the display. The routing itself lives in
+                        # route_to_bridge, so the keeper reaches the same
+                        # engine for the same intent.
+                        supervisor.stop()
                         try:
-                            clipinfo = _prepare_clip(clip)
+                            drawn = route_to_bridge(spec, supervisor.spool)
                         except ValueError as error:
                             return self._send(400, {"error": str(error)})
-                        r = _bridge_command(f"bridge source clip {CLIP_PATH}")
-                        if not r.startswith("ok"):
-                            return self._send(400, {"error": r})
+                        if not drawn:
+                            return self._send(503, {
+                                "error": "the bridge did not take the clip"})
                         supervisor._persist_intent(spec)
                         status = supervisor.status()
-                        status["playing"] = dict(clipinfo,
-                                                 file=spec["file"],
-                                                 by="bridge")
+                        status["playing"] = {"file": spec["file"],
+                                             "by": "bridge", "drawn": drawn}
                         return self._send(200, status)
                     # Whatever is left -- patterns, and anything at all
                     # on a machine with no bridge -- this daemon serves,

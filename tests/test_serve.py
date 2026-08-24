@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The instrument's contract, off-target: a fake runner, a real server."""
 from __future__ import annotations
 
