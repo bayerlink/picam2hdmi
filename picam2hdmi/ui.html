@@ -114,6 +114,20 @@
                  font-size: .8rem; text-align: right; }
   .ispreg input[type=range] { width: 100%; }
   .ispreg.dirty .k { color: #d29922; }
+  /* A module row is NOT an ISP register row. Its last cell holds
+     BUTTONS; the ISP's holds a small right-aligned readout, and its
+     column is 5.5rem wide for that. Borrowed, two buttons overflowed
+     it and Remove sat outside the frame. So: the button column is
+     `auto`, which cannot be narrower than the buttons themselves, and
+     the name truncates rather than shoving them out on a narrow
+     window. Slot names are short ('isp', 'sensor', 'algo'), so the
+     first column shrinks to match. */
+  .modrow { display: grid; grid-template-columns: 5rem minmax(0, 1fr) auto;
+            gap: .6rem; align-items: center; padding: .22rem 0; }
+  .modrow .k { color: #e6edf3; font-family: ui-monospace, monospace;
+               font-size: .85rem; }
+  .modrow .name { overflow: hidden; text-overflow: ellipsis;
+                  white-space: nowrap; }
   #ispbar { display: flex; gap: .6rem; align-items: center;
             flex-wrap: wrap; }
   #ispnote { color: #8b949e; font-size: .85rem; }
@@ -930,11 +944,12 @@ async function loadModules() {
   for (const slot of MOD_SLOTS) {
     const m = mods[slot];
     const row = document.createElement('div');
-    row.className = 'ispreg';
+    row.className = 'modrow';
     const k = document.createElement('span');
     k.className = 'k';
     k.textContent = slot;
     const mid = document.createElement('span');
+    mid.className = 'name';
     mid.textContent = m ? (m.name + ' ' + (m.version || ''))
                         : 'empty';
     mid.style.color = m ? '#e6edf3' : '#57606a';
