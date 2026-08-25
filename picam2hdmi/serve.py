@@ -625,12 +625,54 @@ def _bridge_service(action: str) -> bool:
     import subprocess
 
     try:
+        if action == "start" or action == "restart":
+            # CLEAR THE FAILURE FIRST. The bridge's restarts are bounded
+            # (StartLimitBurst), so a mode it cannot carry leaves the
+            # unit `failed` and systemd then refuses to start it again --
+            # "Start request repeated too quickly". Without this, one bad
+            # choice in the panel is a dead end: the picture is black and
+            # picking a GOOD mode does not bring it back either, because
+            # the start is refused before the bridge ever runs. Asking
+            # for a source is asking for a fresh attempt, so the rate
+            # limit from the last attempt must not veto it.
+            subprocess.run(["systemctl", "reset-failed", "bridge"],
+                           check=False, capture_output=True)
         return subprocess.run(["systemctl", action, "bridge"],
                               check=False).returncode == 0
     except OSError:
         # No systemd, or no bridge unit: this daemon is the only engine
         # here, which is the ordinary case on a development machine.
         return False
+
+
+def _bridge_last_words() -> str:
+    """The last thing the bridge said before it stopped.
+
+    The bridge diagnoses its own refusals precisely -- "the sensor is
+    sending 2592x1944, which does not fit the 1920x1081 raster this link
+    advertises. Choose a smaller sensor mode." Throwing that away and
+    substituting a guess ("the sensor may not offer that mode") turns a
+    fixable answer into a black screen, so the panel repeats what the
+    bridge actually said.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["journalctl", "-u", "bridge", "-n", "40", "--no-pager",
+             "-o", "cat"],
+            check=False, capture_output=True, text=True).stdout
+    except OSError:
+        return ""
+    said = [ln.strip() for ln in out.splitlines()
+            if ln.startswith("bridge: ") or ln.startswith("revela: ")]
+    # Its running status lines are chatter; a refusal is the last thing
+    # that is not one of those.
+    for line in reversed(said):
+        if " seq " in line or "LOCKED" in line or "winsorized" in line:
+            continue
+        return line
+    return ""
 
 
 CLIP_PATH = "/run/bridge-clip.raw"
@@ -1235,15 +1277,30 @@ def _handler(supervisor: Supervisor):
                             except OSError:
                                 pass
                             if want != now:
-                                Path("/run/bridge.env").write_text(
+                                env = Path("/run/bridge.env")
+                                # Keep what worked. A mode the link
+                                # cannot carry must not leave the bench
+                                # unable to come back: without this the
+                                # refused mode stays in the env file and
+                                # every later start fails on it too, so
+                                # one bad choice is a dead end.
+                                before = (env.read_text()
+                                          if env.exists() else None)
+                                env.write_text(
                                     f"BRIDGE_ARGS=--mode {want}\n")
                                 _bridge_service("restart")
                                 if not _bridge_up():
+                                    if before is None:
+                                        env.unlink(missing_ok=True)
+                                    else:
+                                        env.write_text(before)
+                                    _bridge_service("restart")
+                                    said = _bridge_last_words()
                                     return self._send(503, {
-                                        "error": f"the bridge did not come "
-                                                 f"back after asking for "
-                                                 f"{want}; the sensor may "
-                                                 "not offer that mode"})
+                                        "error": said or (
+                                            f"the bridge did not come back "
+                                            f"after asking for {want}"),
+                                        "reverted": True})
                         ignored = [k for k in ("crop",)
                                    if spec.get(k) is not None]
                         supervisor.stop()
