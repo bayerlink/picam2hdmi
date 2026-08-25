@@ -12,16 +12,34 @@
 # supervised one restarts on any exit and keeps testifying (the
 # bridge prints its soak verdict hourly under a supervisor, since
 # there is no exit to print it at). journald owns the log rotation.
+#
+# The restart is supervised but not INFINITE. A refusal that cannot
+# succeed -- no sensor, no display, a device that is not there -- must
+# end in `failed` and stay there, because a unit that flaps forever is
+# worse than one that stops: the panel asks systemd whether the bridge
+# owns the bench, and a flapping unit answers "no" several times a
+# minute, whereupon something else opens the sensor. Measured on
+# 2026-08-25, after a power cut.
 [Unit]
 Description=bayerlink camera bridge (sensor-genlocked HDMI source)
 After=multi-user.target
+StartLimitIntervalSec=120
+StartLimitBurst=6
 
 [Service]
 # BRIDGE_ARGS carries a requested sensor mode (--mode WxH). It lives in
 # /run, so it is a SESSION choice: a reboot returns to the sensor's
-# default, which is the mode a bench should come back in.
+# default, which is the mode a bench should come back in. That is why
+# there is nothing to restore after a power cut -- with no arguments at
+# all the bridge comes up on the sensor's own default, which is the
+# whole point. It finds its sensor BY NAME, so no device path is
+# baked here either.
 EnvironmentFile=-/run/bridge.env
-ExecStart=/usr/local/bin/picam2hdmi bridge --gain 200 $BRIDGE_ARGS
+# No --gain: the gain law belongs to the sensor, and the sensor package
+# applies its own declared unity at the first frame. A number here was
+# 200, which is 12.5x on an ov5647 -- the raw arrived 55% saturated and
+# every stage downstream got blamed in turn.
+ExecStart=/usr/local/bin/picam2hdmi bridge $BRIDGE_ARGS
 Restart=always
 RestartSec=2
 # KMS master and V4L2 subdev access need root on a stock Pi OS Lite.
