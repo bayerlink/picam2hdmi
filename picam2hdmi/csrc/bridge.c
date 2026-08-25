@@ -857,7 +857,15 @@ static int resolve_capture_node(char *out, size_t out_len) {
 }
 
 int main(int argc, char **argv) {
-    int exposure = 1000, gain = 200, seconds = 0, margin_lines = 10;
+    /* NO exposure, NO gain. They belong to the sensor package, where
+     * the AE loop lives; this file knows GEOMETRY -- the raster, the
+     * line lock, the blanking that makes them equal. Both were written
+     * here at startup anyway, and gain=200 is 12.5x on an ov5647: the
+     * raw arrived 55% saturated and every stage downstream was blamed
+     * in turn for highlights lost at the sensor. This file's own
+     * control socket had been refusing callers on exactly that ground
+     * ("the AE loop's to write, not a caller's") while main() did it. */
+    int seconds = 0, margin_lines = 10;
     /* A mode change is a RESTART, deliberately: the whole setup path
      * recomputes the line lock from the sensor's pixel rate and the new
      * geometry, and doing that live would mean redoing by hand what
@@ -871,8 +879,6 @@ int main(int argc, char **argv) {
     char video_found[288];
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) selftest = 1;
-        else if (!strcmp(argv[i], "--exposure")) exposure = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--gain")) gain = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--seconds")) seconds = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--margin")) margin_lines = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--test-pattern")) test_pattern = 1;
@@ -1073,7 +1079,6 @@ int main(int argc, char **argv) {
     set_ctrl(sfd, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL, "ae");
     set_ctrl(sfd, V4L2_CID_AUTOGAIN, 0, "agc");
     set_ctrl(sfd, V4L2_CID_AUTO_WHITE_BALANCE, 0, "awb");
-    set_ctrl(sfd, V4L2_CID_ANALOGUE_GAIN, gain, "gain");
     set_ctrl(sfd, V4L2_CID_TEST_PATTERN, test_pattern, "pattern");
 
     /* LINE LOCK, not just frame lock. The sensor's HTS is writable
@@ -1091,13 +1096,24 @@ int main(int argc, char **argv) {
     int hblank_nom = (int)(t_row_d * pixel_rate + 0.5) - WIDTH;
     int vblank_fix = MODE.vtotal - HEIGHT;
     double t_row_s = (WIDTH + hblank_nom) / pixel_rate;
-    if (exposure > HEIGHT + vblank_fix - 8) {
-        /* an exposure beyond VTS silently stretches the frame -- the
-         * 16fps surprise of 2026-08-18, refused here by arithmetic */
-        exposure = HEIGHT + vblank_fix - 8;
-        fprintf(stderr, "exposure clamped to %d (VTS bound)\n", exposure);
+    /* The integration time is not ours to set, but the RASTER IT MUST
+     * FIT is: an exposure beyond VTS silently stretches the frame and
+     * the line lock goes with it (the 16fps surprise of 2026-08-18).
+     * Only this file knows that bound, because it just computed the
+     * blanking that defines it -- so it is PUBLISHED and complained
+     * about, never overwritten. Whoever owns the value respects it. */
+    int exp_bound = HEIGHT + vblank_fix - 8;
+    printf("bridge: integration must fit %d lines (VTS bound); the value "
+           "is the sensor package's\n", exp_bound);
+    {
+        int32_t in_force = -1;
+        read_ctrl(sfd, V4L2_CID_EXPOSURE, &in_force);
+        if (in_force > exp_bound)
+            fprintf(stderr, "bridge: sensor is at exposure %d, past the %d "
+                            "line bound -- frames will stretch and the lock "
+                            "will drift until the sensor package sets a "
+                            "value that fits\n", in_force, exp_bound);
     }
-    set_ctrl(sfd, V4L2_CID_EXPOSURE, exposure, "exposure");
     set_ctrl(sfd, V4L2_CID_VBLANK, vblank_fix, "vblank");
     set_ctrl(sfd, V4L2_CID_HBLANK, hblank_nom, "hblank");
 

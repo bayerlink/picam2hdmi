@@ -148,8 +148,11 @@ def find_sensor(media: str) -> str:
 
 
 def setup_camera(media: str, video: str, subdev: str, pitch: int,
-                 exposure: int | None, gain: int | None,
                  vblank: int | None) -> None:
+    """Geometry only. Exposure and gain belong to the sensor package,
+    where the AE loop lives; this sets the format, the blanking and the
+    switches that turn the sensor's OWN loops off so somebody else can
+    own them."""
     entity = find_sensor(media)
     _sh("media-ctl", "-d", media, "-V",
         f'"{entity}":0 [fmt:SGBRG10_1X10/{WIDTH}x{HEIGHT}]')
@@ -163,12 +166,12 @@ def setup_camera(media: str, video: str, subdev: str, pitch: int,
             f"is the whole bridge, so this refuses rather than tearing:\n{got}")
     # AE and AWB stay off for the same reason libcamera stays out: the
     # FPGA is the ISP. What is set here is what capture.py sets.
+    # AE and AWB stay off for the same reason libcamera stays out: the
+    # FPGA is the ISP. Turning the sensor's own loops off is not the
+    # same as choosing its exposure -- that value is the sensor
+    # package's, and nothing here writes it.
     ctrls = ["auto_exposure=1", "gain_automatic=0",
              "white_balance_automatic=0"]
-    if exposure is not None:
-        ctrls.append(f"exposure={exposure}")
-    if gain is not None:
-        ctrls.append(f"analogue_gain={gain}")
     if vblank is not None:
         ctrls.append(f"vertical_blanking={vblank}")
     _sh("v4l2-ctl", "-d", subdev, "--set-ctrl", ",".join(ctrls))
@@ -199,8 +202,6 @@ def main() -> int:
     parser.add_argument("--media", default="/dev/media0")
     parser.add_argument("--video", default="/dev/video2")
     parser.add_argument("--subdev", default="/dev/v4l-subdev0")
-    parser.add_argument("--exposure", type=int, default=None)
-    parser.add_argument("--gain", type=int, default=None)
     parser.add_argument("--vblank", type=int, default=None,
                         help="vertical_blanking in sensor lines, step 1: "
                              "the genlock trim, manual for now")
@@ -240,7 +241,7 @@ def main() -> int:
 
         # --- camera, writing into the payload plane's own bytes --------
         setup_camera(args.media, args.video, args.subdev, pay_fb.pitch,
-                     args.exposure, args.gain, args.vblank)
+                     args.vblank)
         dmabuf = card.prime_fd(pay_fb.handle)
         vfd = os.open(args.video, os.O_RDWR | os.O_NONBLOCK)
         try:

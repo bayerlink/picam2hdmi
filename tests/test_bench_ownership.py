@@ -88,3 +88,45 @@ def test_the_answer_does_not_depend_on_whether_the_bridge_is_running():
         "this daemon open the sensor between restarts")
     assert "ActiveState" not in body, (
         "ActiveState flaps for the same reason; ask is-enabled instead")
+
+
+def test_nothing_here_writes_the_sensors_exposure_or_gain():
+    """Exposure and gain belong to the sensor package, and to the AE loop
+    inside it. Asserted over the SOURCE, because the failure is silent:
+    a second writer does not error, it just quietly wins or loses a race
+    with the loop, and the picture is wrong in a way that gets blamed on
+    whatever stage is looked at next.
+
+    The C bridge may still READ them -- its status line is testimony
+    about what the sensor is doing, which owns nothing.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent / "picam2hdmi"
+    offenders = []
+
+    for path in sorted(root.rglob("*.py")):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            for key in ("AnalogueGain", "ExposureTime"):
+                if key in line:
+                    offenders.append(f"{path.name}:{n}: sets {key}")
+
+    # Word-bounded: V4L2_CID_EXPOSURE_AUTO is a different control and a
+    # legitimate one -- it turns the sensor's OWN loop off so that
+    # somebody else may own the value. Switching autonomy off is not the
+    # same as choosing a number.
+    import re
+
+    c = (root / "csrc" / "bridge.c").read_text()
+    writes = re.compile(r"set_ctrl\s*\([^;]*?\b"
+                        r"(V4L2_CID_ANALOGUE_GAIN|V4L2_CID_EXPOSURE)\b")
+    for n, line in enumerate(c.splitlines(), 1):
+        found = writes.search(line)
+        if found:
+            offenders.append(f"bridge.c:{n}: writes {found.group(1)}")
+
+    assert not offenders, (
+        "exposure and gain have one owner, the sensor package:\n  "
+        + "\n  ".join(offenders))

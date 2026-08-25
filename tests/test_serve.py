@@ -187,11 +187,10 @@ def test_crop_only_change_retargets_the_running_camera(instrument):
     assert code == 400 and "display" in body["error"]
     assert supervisor._camera_ref["crop"] == (8, 2, 16, 8)
 
-    # Exposure and gain are LIVE-TUNABLE: they ride the same lane as
-    # the window and never touch the world. A gain slider must have no
-    # path to a display-mode negotiation.
-    assert supervisor._crop_only_change(dict(spec, gain=4.0))
-
+    # A gain in a spec reaches the SENSOR through nothing here. Exposure
+    # and gain live in the sensor package, with the AE loop; this daemon
+    # writing them would be a second owner of values that loop is
+    # already driving. The live lane exists for the WINDOW.
     class _Recorder:
         def __init__(self):
             self.controls = []
@@ -202,8 +201,10 @@ def test_crop_only_change_retargets_the_running_camera(instrument):
     recorder = _Recorder()
     supervisor._camera_ref["picam2"] = recorder
     supervisor._live_controls(dict(spec, gain=4.0))
-    assert recorder.controls[-1]["AnalogueGain"] == 4.0
-    assert supervisor.stored_spec()["gain"] == 4.0
+    assert not any("AnalogueGain" in c or "ExposureTime" in c
+                   for c in recorder.controls), (
+        "the daemon must not write the sensor's exposure or gain: they "
+        "belong to the sensor package, where the AE loop lives")
 
     # The world-touching keys still restart: a different sensor mode
     # is a different stream.

@@ -141,10 +141,6 @@
       <option value="1920x1080">1920x1080</option>
       <option value="2592x1944">2592x1944 (full, crop to fit)</option>
       <option value="640x480">640x480</option></select></label>
-    <label>exposure µs <input id="cexp" type="number" value="30000"
-      onchange="applyFromFields()"></label>
-    <label>gain <input id="cgain" type="number" step="0.1" value="4.0"
-      onchange="applyFromFields()"></label>
 
     <div id="croparea">
       <div id="wirewin"><img id="wireimg" alt=""></div>
@@ -253,24 +249,22 @@ function showCards() {
   if (kind === 'camera') drawCrop();
 }
 
-/* The bridge streams at a geometry fixed when it was built, and takes
- * exposure and gain from its own loop. Offering controls it cannot act
- * on is worse than not offering them: the picture does not change and
- * nothing says why. */
+/* This panel has NO exposure and NO gain, by rule rather than by
+ * layout: they belong to the sensor package, where the AE loop lives.
+ * A field here would be a second owner of a value the loop is already
+ * driving -- and a control that cannot act is worse than an absent one,
+ * because the picture does not change and nothing says why. The MODE
+ * stays, because geometry restarts the bridge, which is the agreed
+ * price of new geometry. */
 function cameraControlsFor(owner) {
   const fixed = owner === 'bridge';
-  // The MODE is changeable -- it restarts the bridge, which is the
-  // agreed price of new geometry. Exposure and gain are not: they
-  // belong to the loop while it is streaming.
-  for (const id of ['cexp', 'cgain'])
-    if ($(id)) $(id).disabled = fixed;
   const note = $('camfixed');
   if (!note) return;
   note.hidden = !fixed;
   note.textContent = fixed
-    ? 'The bridge owns this sensor and drives exposure and gain from its '
-      + 'own loop, so those do not apply while it is streaming. Changing '
-      + 'the mode restarts it, and the picture drops for a moment.'
+    ? 'The bridge owns this sensor. Exposure and gain live in the sensor '
+      + 'package with the AE loop, not here. Changing the mode restarts '
+      + 'the bridge, and the picture drops for a moment.'
     : '';
 }
 
@@ -397,8 +391,6 @@ function seedCameraFields(src) {
     haveMode(value);
     if ($('cmode').value !== value) { $('cmode').value = value; modeChanged(); }
   }
-  if (src.exposure_us != null) $('cexp').value = src.exposure_us;
-  if (src.gain != null) $('cgain').value = src.gain;
 }
 
 function applyFromFields() {
@@ -557,10 +549,6 @@ function applyCamera() {
 });
   if (useSelection) spec.crop = [crop.x, crop.y, crop.w, crop.h];
   else delete spec.crop;
-  if ($('cexp').value !== '') spec.exposure_us = +$('cexp').value;
-  else delete spec.exposure_us;
-  if ($('cgain').value !== '') spec.gain = +$('cgain').value;
-  else delete spec.gain;
   err('');
   api('PUT', '/source', spec).then(refresh).catch(e => {
     err(e.message);

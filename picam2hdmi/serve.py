@@ -262,11 +262,10 @@ class Supervisor:
         change a non-live key."""
         ref = self._camera_ref or {}
         picam2 = ref.get("picam2")
+        # Nothing to push: exposure and gain are the sensor package's,
+        # so a live retune here is the WINDOW only. A panel that could
+        # write them would be a second owner of the AE loop's values.
         controls = {}
-        if spec.get("exposure_us") is not None:
-            controls["ExposureTime"] = int(spec["exposure_us"])
-        if spec.get("gain") is not None:
-            controls["AnalogueGain"] = float(spec["gain"])
         if picam2 is not None and controls:
             picam2.set_controls(controls)
         self.spec = dict(spec)
@@ -338,8 +337,7 @@ class Supervisor:
                 display,
                 mode=tuple(int(v) for v in cam_mode) if cam_mode else None,
                 crop=tuple(int(v) for v in crop) if crop else None,
-                exposure_us=spec.get("exposure_us"),
-                analogue_gain=spec.get("gain"), peek=_stash, crop_ref=crop_ref,
+                peek=_stash, crop_ref=crop_ref,
                 source_id=spec.get("source_id"))
             first = next(frames)          # frame 0 peeked during this pull
             preview = self.preview_container
@@ -1246,7 +1244,7 @@ def _handler(supervisor: Supervisor):
                                                  f"back after asking for "
                                                  f"{want}; the sensor may "
                                                  "not offer that mode"})
-                        ignored = [k for k in ("crop", "exposure_us", "gain")
+                        ignored = [k for k in ("crop",)
                                    if spec.get(k) is not None]
                         supervisor.stop()
                         try:

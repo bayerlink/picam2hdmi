@@ -106,8 +106,6 @@ def check_rate(width: int, display: tuple[int, int]) -> None:
 
 def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
            crop: tuple[int, int, int, int] | None = None,
-           exposure_us: int | None = None,
-           analogue_gain: float | None = None,
            flags: int = 0, peek=None,
            crop_ref=None, source_id: int | None = None):
     """An endless container source from the camera. Runs on the Pi.
@@ -167,10 +165,8 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
             f"{error}") from error
     size = tuple(mode) if mode else (1296, 972)
     controls = {"AeEnable": False, "AwbEnable": False}
-    if exposure_us is not None:
-        controls["ExposureTime"] = int(exposure_us)
-    if analogue_gain is not None:
-        controls["AnalogueGain"] = float(analogue_gain)
+    # No ExposureTime, no AnalogueGain: those are the sensor package's,
+    # where the AE loop lives. This module owns the raw stream's shape.
     # Controls ride in the CONFIGURATION, not set after start: the very
     # first frame obeys them, which is what deterministic means.
     config = picam2.create_video_configuration(raw={"size": size},
@@ -223,8 +219,7 @@ def frames(display: tuple[int, int], mode: tuple[int, int] | None = None,
     print(f"camera: {model or 'unknown'} (source_id {sid}"
           + ("" if sid else ", UNKNOWN to bayerlink's table") + "), "
           f"{fmt} {sensor_w}x{sensor_h}, window {w}x{h}+{x}+{y}, AE/AWB off"
-          + (f", exposure {exposure_us}us" if exposure_us else "")
-          + (f", gain {analogue_gain}" if analogue_gain else ""))
+          )
 
     group_samples, group_bytes = _GROUP[bits]
     line_bytes = sensor_w // group_samples * group_bytes

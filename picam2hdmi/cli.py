@@ -63,11 +63,6 @@ def main(argv=None) -> int:
                         help="sensor window x,y,w,h for --source camera -- "
                              "how a big sensor meets the link budget, and "
                              "how a small window fits the wire")
-    stream.add_argument("--exposure-us", type=int, default=None,
-                        help="fixed exposure for --source camera (AE is "
-                             "off by default: a raw source is deterministic)")
-    stream.add_argument("--gain", type=float, default=None,
-                        help="fixed analogue gain for --source camera")
     stream.add_argument("--connector", type=int, default=None)
     stream.add_argument("--card", default=None, help="/dev/dri/cardN override")
 
@@ -189,8 +184,6 @@ def main(argv=None) -> int:
             if args.crop:
                 crop = tuple(int(v) for v in args.crop.split(","))
             frames = capture.frames(display, mode=cam_mode, crop=crop,
-                                    exposure_us=args.exposure_us,
-                                    analogue_gain=args.gain,
                                     source_id=args.source_id)
         elif args.source == "file":
             if not args.file:
