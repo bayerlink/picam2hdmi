@@ -176,7 +176,6 @@
       <button id="win-full" onclick="windowMode(false)">Full frame</button>
       <button id="win-sel" onclick="windowMode(true)">Selection</button>
     </span>
-    <button onclick="captureFrame()">Capture</button>
   </div>
 
   <section class="below" id="bridgewrap">
@@ -184,6 +183,18 @@
     <div id="bridgebar">
       <span id="bridgestate">checking…</span>
       <button id="bpause" onclick="bridgePause()">Pause</button>
+      <!-- Beside Pause because a capture IS a pause: the daemon freezes
+           the bridge, copies the container the display is holding, and
+           resumes. Taken live it would tear, the next frame beginning
+           the instant the last one lands. It sat with the crop controls
+           before, which a bridge bench disables -- a working button
+           among greyed-out ones. Unlike Pause it is NOT hidden when the
+           bridge is down: with no bridge the daemon captures from its
+           own stream, and that still works. -->
+      <button id="bcapture" onclick="captureFrame()"
+              title="saves the frame now on the display as a recording; the
+                     picture freezes for about a tenth of a second while it
+                     is copied">Capture</button>
     </div>
     <div id="bridgesensor" class="raw" style="text-align:left"></div>
     <div id="bridgeprev" hidden>
@@ -418,6 +429,12 @@ function captureFrame() {
   // Freeze what the wire is emitting -- the current window, container
   // and all -- into the next capture-NNN.npy. It appears in the source
   // list at once, because a capture IS a recording.
+  //
+  // With a bridge this pauses it, copies the container the display is
+  // holding, and resumes -- roughly a tenth of a second of frozen
+  // picture, which the button says so nobody reads it as a glitch.
+  // Without one the daemon captures from its own stream, which is why
+  // this button is not hidden along with Pause.
   err('');
   api('POST', '/capture').then(refresh).catch(e => err(e.message));
 }
