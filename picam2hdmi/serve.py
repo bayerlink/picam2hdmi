@@ -813,11 +813,35 @@ def _bridge_owns_bench() -> bool:
     """
     import subprocess
 
+    # INSTALLED, not running. Whether the bridge happens to be up is a
+    # state that changes by the second; whether this bench HAS a bridge
+    # is a property of the machine, and it is the second question that
+    # decides who may open the sensor.
+    #
+    # Asking the first question is what cost the bench on 2026-08-25. A
+    # power cut left the bridge failing on a stale device path. It
+    # flapped, and every reader of "is it active?" saw `no` in the gaps
+    # -- so the panel enumerated cameras through libcamera, libcamera
+    # opened the sensor, and the panel then HELD it. Repairing the
+    # bridge no longer helped: the camera it needed was taken, by the
+    # very daemon that is not supposed to touch it. Widening the check
+    # to accept `activating` did not fix it either, because a unit that
+    # has properly given up reads `failed`, and a failed bridge is
+    # exactly when the sensor must stay untouched so that fixing the
+    # bridge is enough.
+    #
+    # So: if a bridge unit is installed here, the bridge owns the
+    # camera -- running, restarting, failed or stopped. On a machine
+    # with no bridge unit this daemon is the engine, which is the
+    # ordinary development case and the only case that changes.
     try:
-        return subprocess.run(["systemctl", "is-active", "--quiet", "bridge"],
-                              check=False).returncode == 0
+        enabled = subprocess.run(
+            ["systemctl", "is-enabled", "bridge"],
+            check=False, capture_output=True, text=True).stdout.strip()
     except OSError:
         return False
+    return enabled in ("enabled", "enabled-runtime", "static", "linked",
+                       "indirect", "generated", "alias")
 
 
 def _bridge_running() -> bool:
