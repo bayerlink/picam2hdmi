@@ -61,10 +61,6 @@
                 linear-gradient(#161b22 1px, transparent 1px),
                 linear-gradient(90deg, #161b22 1px, transparent 1px);
               background-size: 10% 10%; }
-  #wirewin { position: absolute; pointer-events: none; display: none;
-             overflow: hidden; }
-  #wirewin img { width: 100%; height: 100%; display: block;
-                 image-rendering: pixelated; }
   #cropbox { position: absolute; border: 2px solid #3fb950;
              background: rgba(63, 185, 80, .12); cursor: grab;
              box-sizing: border-box; }
@@ -157,7 +153,6 @@
       <option value="640x480">640x480</option></select></label>
 
     <div id="croparea">
-      <div id="wirewin"><img id="wireimg" alt=""></div>
       <div id="cropbox">
         <div class="handle h-n"  data-h="n"></div>
         <div class="handle h-s"  data-h="s"></div>
@@ -463,25 +458,12 @@ function drawCrop() {
   box.style.height = crop.h * scale + 'px';
   $('win-full').classList.toggle('sel', !useSelection);
   $('win-sel').classList.toggle('sel', useSelection);
-  // The live image is pinned to the window ON THE WIRE; the green box
-  // is the pending selection. They coincide exactly when what you drew
-  // is what is streaming -- resizing the box never scales the picture.
-  // The image itself is the instrument's PUSH stream: the browser
-  // renders frames as they arrive, no polling script in the loop.
-  const wirewin = $('wirewin');
-  const wireimg = $('wireimg');
-  if (wire) {
-    wirewin.style.display = 'block';
-    wirewin.style.left = wire.x * scale + 'px';
-    wirewin.style.top = wire.y * scale + 'px';
-    wirewin.style.width = wire.w * scale + 'px';
-    wirewin.style.height = wire.h * scale + 'px';
-    if (!wireimg.getAttribute('src'))
-      wireimg.src = '/preview.stream';
-  } else {
-    wirewin.style.display = 'none';
-    if (wireimg.getAttribute('src')) wireimg.removeAttribute('src');
-  }
+  // `wire` is still the window ON THE WIRE, and the green box the
+  // pending selection; they coincide when what you drew is what is
+  // streaming. What used to be here as well was a live image pinned
+  // inside that window -- removed, because it was fed by this daemon's
+  // own stream and on a bridge bench the daemon never draws the camera.
+  // It could not have shown anything.
   const win = effective();
   const applied = wire && win.x === wire.x && win.y === wire.y &&
                   win.w === wire.w && win.h === wire.h;
