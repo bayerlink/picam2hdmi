@@ -27,6 +27,7 @@
  * whole contribution to end-to-end latency.
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -804,6 +805,57 @@ static double to_mono(double ts, int *bad) {
     return ts;
 }
 
+
+/* WHICH NODE IS THE SENSOR, asked by NAME rather than by number.
+ *
+ * /dev/videoN is enumeration order, not identity. This was pinned to
+ * /dev/video2 and stayed correct until a power cut on 2026-08-25: the
+ * Pi came back with unicam on video0 and a USB capture card on video1
+ * and video2, so the bridge asked a UVC card for 10-bit Bayer and got
+ * "S_FMT: Invalid argument" -- the right complaint about the wrong
+ * device. Everything after that was consequence: the unit failed,
+ * Restart=always made it flap, and the panel read the flapping as "no
+ * bridge here" and opened the sensor itself.
+ *
+ * The kernel publishes a stable name for every node, so ask for that.
+ * The name is generation-specific -- Pi 0-4 present the CSI-2 receiver
+ * as `unicam`, Pi 5 replaced it with `rp1-cfe` -- so this is a table,
+ * in preference order, not one string.
+ */
+static const char *const CAPTURE_NAMES[] = {
+    "unicam-image",         /* bcm2835-unicam: Pi 0-4 */
+    "rp1-cfe-csi2_ch0",     /* rp1-cfe: Pi 5 */
+};
+
+static int resolve_capture_node(char *out, size_t out_len) {
+    for (size_t n = 0; n < sizeof CAPTURE_NAMES / sizeof *CAPTURE_NAMES; n++) {
+        DIR *d = opendir("/sys/class/video4linux");
+        if (!d) return -1;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strncmp(e->d_name, "video", 5)) continue;
+            /* 23 of prefix + a 240-bounded node name + "/name" */
+            char path[320], name[128];
+            snprintf(path, sizeof path,
+                     "/sys/class/video4linux/%.240s/name",
+                     e->d_name);
+            FILE *f = fopen(path, "r");
+            if (!f) continue;
+            if (!fgets(name, sizeof name, f)) { fclose(f); continue; }
+            fclose(f);
+            name[strcspn(name, "\n")] = 0;
+            if (strcmp(name, CAPTURE_NAMES[n])) continue;
+            /* precision bound: d_name is a 255-byte field and
+             * the compiler cannot see that a node name is short */
+            snprintf(out, out_len, "/dev/%.240s", e->d_name);
+            closedir(d);
+            return 0;
+        }
+        closedir(d);
+    }
+    return -1;
+}
+
 int main(int argc, char **argv) {
     int exposure = 1000, gain = 200, seconds = 0, margin_lines = 10;
     /* A mode change is a RESTART, deliberately: the whole setup path
@@ -815,7 +867,8 @@ int main(int argc, char **argv) {
     unsigned want_w = 0, want_h = 0;
     const char *want_order = NULL;
     int test_pattern = 0, selftest = 0;
-    const char *video = "/dev/video2", *subdev = "/dev/v4l-subdev0";
+    const char *video = NULL, *subdev = "/dev/v4l-subdev0";
+    char video_found[288];
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) selftest = 1;
         else if (!strcmp(argv[i], "--exposure")) exposure = atoi(argv[++i]);
@@ -866,6 +919,27 @@ int main(int argc, char **argv) {
                     printf("crop %s %u %u %s\n", FORMATS[i].order, dx, dy,
                            FORMATS[format_after_crop((int)i, dx, dy)].order);
         return 0;
+    }
+
+    /* Not given: find it by NAME. Refused rather than guessed when no
+     * known receiver is present -- a guess streams from whatever
+     * enumerated into that slot, and a UVC capture card answers the
+     * open perfectly happily.
+     *
+     * After the selftest, deliberately: that block's stdout is compared
+     * byte-for-byte against the Python reference, so anything printed
+     * ahead of it is a failure of `make check`. The selftest needs no
+     * device -- it proves the header layout, not the hardware. */
+    if (!video) {
+        if (resolve_capture_node(video_found, sizeof video_found)) {
+            fprintf(stderr, "bridge: no CSI-2 receiver node found by name "
+                            "(looked for unicam-image, rp1-cfe-csi2_ch0 in "
+                            "/sys/class/video4linux). Name one with "
+                            "--video if this Pi presents another.\n");
+            return 1;
+        }
+        video = video_found;
+        printf("bridge: sensor node %s (found by name, not number)\n", video);
     }
 
     signal(SIGINT, on_sig); signal(SIGTERM, on_sig);
