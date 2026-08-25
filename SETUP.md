@@ -71,12 +71,15 @@ capture-stick path in the bayerlink guide. `sudo` is for DRM master
 With a camera attached:
 
 ```sh
-sudo picam2hdmi stream --source camera --exposure-us 30000 --gain 4.0
+sudo picam2hdmi stream --source camera
 ```
 
-Exposure and gain are explicit because auto-exposure is off by design —
-a raw source should be deterministic. If frames are near-black, raise
-them; nothing is broken.
+The sensor's own auto-exposure, auto-gain and auto-white-balance are
+turned off: a raw source should be deterministic, and the ISP downstream
+is what decides those. The VALUES are not set here either — they belong
+to the sensor package, where the AE loop lives. Without one installed the
+sensor keeps whatever it was last left at, so a near-black or a blown
+frame means nobody has set it yet, not that anything is broken.
 
 ## 4. Instrument mode
 
@@ -98,7 +101,7 @@ port 8080:
 ```sh
 curl http://picam.local:8080/status
 curl -X PUT http://picam.local:8080/source \
-     -d '{"source":"camera","exposure_us":30000,"gain":4.0,"crop":[600,366,96,240]}'
+     -d '{"source":"camera","crop":[600,366,96,240]}'
 ```
 
 A LAN instrument, not an internet service: it binds 0.0.0.0 and has no
@@ -114,8 +117,10 @@ pulled plugs); switching power back on brings everything back.
 
 - **`main.py: DRM master` / modeset errors** — a desktop session owns
   the display. Use OS Lite, or stop the display manager.
-- **Near-black camera frames** — AE is off by design; set
-  `--exposure-us` / `--gain` (see step 3).
+- **Near-black or blown camera frames** — the sensor's own AE and AGC are
+  off by design, and this package does not set exposure or gain: a sensor
+  package owns them. With none installed the sensor keeps whatever it was
+  last left at.
 - **Refusals** (geometry, rate rule) — the message names
   the limit and the fix; they are the tool working, not failing.
 - **Capture stick shows a frozen frame** after the source switches

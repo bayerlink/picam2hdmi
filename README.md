@@ -44,8 +44,8 @@ print(header.bayer_order, header.width, header.height, header.frame_seq)
 | bayerlink v2 protocol, patterns, vectors | **done** — in [bayerlink](https://github.com/bayerlink/bayerlink) |
 | CLI: pattern → container file | **done** |
 | KMS scanout (double-buffered, full-range RGB forced) | **working** — pure ctypes DRM, proven on the bench |
-| Picamera2 raw capture | **working** — the sensor's packed bytes ride to the wire verbatim; crop, fixed exposure/gain, every libcamera camera unseen |
-| Instrument mode | **working** — `picam2hdmi serve`: HTTP control, recordings spool, a control panel with a live viewfinder crop editor and a power button; the last source is restored at boot (`contrib/picam2hdmi.service`) |
+| Picamera2 raw capture | **working** — the sensor's packed bytes ride to the wire verbatim; crop, and every libcamera camera unseen. Exposure and gain are not set here: they belong to the sensor package, where the AE loop lives |
+| Instrument mode | **working** — `picam2hdmi serve`: HTTP control, recordings spool, a control panel and a power button; the last source is restored at boot (`contrib/picam2hdmi.service`). On a bridge bench the panel offers what the bridge can act on and nothing else — geometry, exposure and gain all belong elsewhere |
 | Genlocked bridge | **working** — `picam2hdmi bridge`: the C daemon, sensor lines onto the wire in lines, output phase-locked to the sensor so latency is lines and no frame is shown twice or dropped (`contrib/bridge.service`) |
 | Module slots | **working** — C packages uploaded from the panel and compiled into the bridge: `isp` (policy: the bridge hooks and the far end's registers), `sensor` (a driver), `algo` (pure computation) |
 
@@ -76,7 +76,7 @@ streaming instrument (or `contrib/install.sh` does the install in one go).
 The short of it:
 
 ```bash
-sudo picam2hdmi stream --source camera --exposure-us 30000 --gain 4.0
+sudo picam2hdmi bridge                 # the genlocked source: sensor -> wire
 sudo picam2hdmi serve                  # instrument: panel + HTTP on :8080
 ```
 
