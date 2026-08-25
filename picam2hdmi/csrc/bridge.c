@@ -404,6 +404,10 @@ static uint8_t *clip_map;
 static size_t clip_bytes, clip_frame_bytes, clip_frames, clip_at;
 static int clip_drawn;
 static int scratch_fd = -1;
+/* How many captures V4L2 holds at once. Named because two places need
+ * it to agree: REQBUFS, and how many frames a still must be redrawn for
+ * after a switch (see clip_drawn). */
+#define CAPTURE_BUFS 2
 static uint8_t *scratch_map;
 static uint32_t scratch_pitch;
 
@@ -1138,11 +1142,11 @@ int main(int argc, char **argv) {
      * slots import the same dmabuf, so every frame still lands in
      * the one beam-racing BO. */
     struct v4l2_requestbuffers req = {
-        .count = 2, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+        .count = CAPTURE_BUFS, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
         .memory = V4L2_MEMORY_DMABUF};
     if (ioctl(vfd, VIDIOC_REQBUFS, &req) < 0) die("REQBUFS");
 
-    for (uint32_t i = 0; i < 2; i++) {
+    for (uint32_t i = 0; i < CAPTURE_BUFS; i++) {
         struct v4l2_buffer buf = {
             .index = i, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
             .memory = V4L2_MEMORY_DMABUF, .length = (uint32_t)pay.size};
@@ -1257,14 +1261,26 @@ int main(int argc, char **argv) {
          * written, so everything downstream -- the header, the raster,
          * the genlock -- is unchanged. A still is copied once: there is
          * no reason to move six megabytes a frame to show one picture. */
-        if (clip_map && (clip_frames > 1 || !clip_drawn)) {
+        /* A still is redrawn for CAPTURE_BUFS frames, not once. At the
+         * moment of the switch every queued capture still targets the
+         * DISPLAYED buffer -- only the one queued below is redirected to
+         * scratch. So the still is copied in, and then the sensor
+         * completes the capture that was already in flight straight over
+         * the top of it. Drawn once, nothing ever put it back: the
+         * television sat on the last sensor frame until the source was
+         * clicked a SECOND time, which reset this counter and redrew
+         * after the queue had drained. */
+        if (clip_map && (clip_frames > 1 || clip_drawn < CAPTURE_BUFS)) {
             const uint8_t *src = clip_map + clip_at * clip_frame_bytes;
             memcpy(base.map, src, WIDTH * 3);          /* the recorded header */
             for (uint32_t r = 0; r < HEIGHT; r++)
                 memcpy(pay.map + (size_t)r * pay.pitch,
                        src + (size_t)(r + 1) * WIDTH * 3, WIDTH * 3);
             clip_at = (clip_at + 1) % clip_frames;
-            clip_drawn = 1;
+            /* Clamped: a moving clip redraws every frame anyway, and an
+             * unbounded counter would be the only thing here that could
+             * overflow given long enough. */
+            if (clip_drawn < CAPTURE_BUFS) clip_drawn++;
         }
         if (ioctl(vfd, VIDIOC_QBUF, &dq) < 0) { perror("QBUF"); break; }
 
