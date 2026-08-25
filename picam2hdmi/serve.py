@@ -940,7 +940,19 @@ def _handler(supervisor: Supervisor):
             return supervisor.spool / name
 
         def do_GET(self):
-            if self.path in ("/", "/index.html"):
+            # ROUTE ON THE PATH, not on the path plus its query. Every
+            # exact-match route below would otherwise 404 the moment a
+            # caller appended anything -- and the panel appends a
+            # cache-buster to the preview image on purpose, so
+            # /bridge/preview.png?t=... never once reached this handler
+            # and the panel showed a broken-image icon for it. Only
+            # /preview.png survived, by the accident of needing
+            # startswith for its ?recording= form.
+            #
+            # self.path is left intact: the handlers that read a query
+            # parse it from there.
+            route = self.path.split("?", 1)[0]
+            if route in ("/", "/index.html"):
                 page = (Path(__file__).parent / "ui.html").read_bytes()
                 # Stamp the page with its own hash; status reports the
                 # current one. A tab that outlives a deploy sees the
@@ -948,9 +960,9 @@ def _handler(supervisor: Supervisor):
                 # stale spec gets re-applied to a live stream.
                 page = page.replace(b"@PANEL@", _panel_hash().encode())
                 return self._send_bytes(200, page, "text/html; charset=utf-8")
-            if self.path == "/status":
+            if route == "/status":
                 return self._send(200, supervisor.status())
-            if self.path == "/cameras":
+            if route == "/cameras":
                 # Do not open the sensor behind the bridge's back. The
                 # enumeration itself acquires the camera, and the bridge
                 # is mid-stream on it.
@@ -987,10 +999,10 @@ def _handler(supervisor: Supervisor):
                         if camera["index"] == supervisor.camera_index():
                             camera["modes"] = [list(m) for m in modes]
                 return self._send(200, {"cameras": cameras})
-            if self.path == "/modules":
+            if route == "/modules":
                 from . import modules_mgr
                 return self._send(200, modules_mgr.status())
-            if self.path == "/bridge/status":
+            if route == "/bridge/status":
                 # The bridge is the real-time owner on this bench: it
                 # holds the sensor and the display and keeps the picture
                 # alive whether or not this daemon is running. The panel
@@ -1018,7 +1030,7 @@ def _handler(supervisor: Supervisor):
                         fields[key] = value
                 fields["running"] = True
                 return self._send(200, fields)
-            if self.path == "/bridge/preview.png":
+            if route == "/bridge/preview.png":
                 # What the SENSOR is writing, decimated by the bridge --
                 # the scratch buffer while paused, the displayed one
                 # otherwise. Raw Bayer sampled at constant CFA phase, so
@@ -1038,7 +1050,7 @@ def _handler(supervisor: Supervisor):
                                     dtype=np.uint8).reshape(int(height),
                                                             int(width))
                 return self._send_bytes(200, _png_gray(img), "image/png")
-            if self.path == "/isp/params":
+            if route == "/isp/params":
                 regmap = _isp_regmap()
                 if regmap is None:
                     return self._send(404, {
@@ -1046,7 +1058,7 @@ def _handler(supervisor: Supervisor):
                                  "the map-carrying package format -- "
                                  "reinstall the isp slot"})
                 return self._send(200, regmap)
-            if self.path == "/isp/values":
+            if route == "/isp/values":
                 # Read every register back off the far end, one command
                 # per key. Sequential and a little slow by design: the
                 # DDC wire is the truth being asked for, and the panel
@@ -1070,10 +1082,10 @@ def _handler(supervisor: Supervisor):
                         "error": f"bridge control socket: {error}"})
                 return self._send(200, {"values": values,
                                         "unreachable": unreachable})
-            if self.path == "/recordings":
+            if route == "/recordings":
                 return self._send(200, {"recordings":
                                         supervisor.status()["spool"]})
-            if self.path == "/preview.stream":
+            if route == "/preview.stream":
                 # Push, don't poll: multipart/x-mixed-replace is the
                 # oldest live-view trick on the web and still the best
                 # fit for an instrument -- the browser renders parts as
@@ -1106,7 +1118,7 @@ def _handler(supervisor: Supervisor):
                         time.sleep(0.1)
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     return
-            if self.path.startswith("/preview.png"):
+            if route.startswith("/preview.png"):
                 _, _, query = self.path.partition("?")
                 container = supervisor.preview_container
                 if query.startswith("recording="):
@@ -1125,8 +1137,8 @@ def _handler(supervisor: Supervisor):
                                             "image/png")
                 except ValueError as error:
                     return self._send(400, {"error": str(error)})
-            if self.path.startswith("/recordings/"):
-                path = self._spool_name(self.path[len("/recordings/"):])
+            if route.startswith("/recordings/"):
+                path = self._spool_name(route[len("/recordings/"):])
                 if path is None:
                     return self._send(400, {"error": "recording name must "
                                             "be a plain <name>.npy"})
@@ -1137,7 +1149,8 @@ def _handler(supervisor: Supervisor):
             return self._send(404, {"error": f"no route {self.path!r}"})
 
         def do_POST(self):
-            if self.path == "/capture":
+            route = self.path.split("?", 1)[0]
+            if route == "/capture":
                 if _bridge_running():
                     try:
                         name = _capture_from_bridge(supervisor.spool)
@@ -1150,7 +1163,7 @@ def _handler(supervisor: Supervisor):
                 except ValueError as error:
                     return self._send(400, {"error": str(error)})
                 return self._send(200, {"saved": name})
-            if self.path == "/isp/set":
+            if route == "/isp/set":
                 length = int(self.headers.get("Content-Length", 0))
                 try:
                     body = json.loads(self.rfile.read(length) or b"{}")
@@ -1171,8 +1184,8 @@ def _handler(supervisor: Supervisor):
                 if not r.startswith("ok"):
                     return self._send(400, {"error": r})
                 return self._send(200, {"set": key, "value": value})
-            if self.path in ("/bridge/pause", "/bridge/resume"):
-                verb = self.path.rsplit("/", 1)[1]
+            if route in ("/bridge/pause", "/bridge/resume"):
+                verb = route.rsplit("/", 1)[1]
                 try:
                     r = _bridge_command(f"bridge {verb}")
                 except OSError as error:
@@ -1181,7 +1194,7 @@ def _handler(supervisor: Supervisor):
                 if not r.startswith("ok"):
                     return self._send(400, {"error": r})
                 return self._send(200, {verb: True, "detail": r[3:].strip()})
-            if self.path == "/isp/commit":
+            if route == "/isp/commit":
                 try:
                     r = _bridge_command("commit")
                 except OSError as error:
@@ -1193,16 +1206,17 @@ def _handler(supervisor: Supervisor):
             self._send(404, {"error": "unknown path"})
 
         def do_DELETE(self):
-            if self.path.startswith("/modules/"):
+            route = self.path.split("?", 1)[0]
+            if route.startswith("/modules/"):
                 from . import modules_mgr
                 try:
                     result = modules_mgr.remove(
-                        self.path[len("/modules/"):])
+                        route[len("/modules/"):])
                 except ValueError as error:
                     return self._send(400, {"error": str(error)})
                 return self._send(200, result)
-            if self.path.startswith("/recordings/"):
-                path = self._spool_name(self.path[len("/recordings/"):])
+            if route.startswith("/recordings/"):
+                path = self._spool_name(route[len("/recordings/"):])
                 if path is None:
                     return self._send(400, {"error": "recording name must "
                                             "be a plain <name>.npy"})
@@ -1213,8 +1227,9 @@ def _handler(supervisor: Supervisor):
             return self._send(404, {"error": f"no route {self.path!r}"})
 
         def do_PUT(self):
+            route = self.path.split("?", 1)[0]
             length = int(self.headers.get("Content-Length", 0))
-            if self.path == "/power":
+            if route == "/power":
                 try:
                     spec = json.loads(self.rfile.read(length) or b"{}")
                 except ValueError as error:
@@ -1231,7 +1246,7 @@ def _handler(supervisor: Supervisor):
                 # before the network interface goes down with the OS.
                 threading.Timer(1.0, _off).start()
                 return self._send(200, {"powering_off": True})
-            if self.path == "/source":
+            if route == "/source":
                 try:
                     spec = json.loads(self.rfile.read(length) or b"{}")
                     # ONE selection decides what is on the television,
@@ -1357,9 +1372,9 @@ def _handler(supervisor: Supervisor):
                     return self._send(400, {
                         "error": f"{type(error).__name__}: {error}"})
                 return self._send(200, supervisor.status())
-            if self.path.startswith("/modules/"):
+            if route.startswith("/modules/"):
                 from . import modules_mgr
-                slot = self.path[len("/modules/"):]
+                slot = route[len("/modules/"):]
                 try:
                     result = modules_mgr.install(slot,
                                                  self.rfile.read(length))
@@ -1369,8 +1384,8 @@ def _handler(supervisor: Supervisor):
                     return self._send(400, {
                         "error": f"{type(error).__name__}: {error}"})
                 return self._send(200, result)
-            if self.path.startswith("/recordings/"):
-                name = self.path[len("/recordings/"):]
+            if route.startswith("/recordings/"):
+                name = route[len("/recordings/"):]
                 path = self._spool_name(name)
                 if path is None:
                     return self._send(400, {

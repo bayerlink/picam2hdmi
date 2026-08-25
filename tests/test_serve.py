@@ -448,3 +448,22 @@ def test_the_container_is_derived_content_plus_one(instrument):
     while not calls and time.monotonic() < deadline:
         time.sleep(0.01)
     assert calls and calls[0] == ((1280, 720, 60), False)
+
+
+def test_a_query_string_does_not_hide_a_route(instrument):
+    """Routing is on the PATH, not the path plus its query.
+
+    The panel appends a cache-buster to the preview image on purpose --
+    `/bridge/preview.png?t=...` -- and every exact-match route compared
+    the whole of self.path, so that request 404'd every single time and
+    the panel showed a broken-image icon where the sensor preview should
+    be. It had never worked. Only /preview.png survived, by the accident
+    of needing startswith for its ?recording= form.
+    """
+    _, port = instrument
+    for path in ("/status", "/recordings", "/modules"):
+        bare, _ = _request(port, "GET", path)
+        with_query, _ = _request(port, "GET", path + "?t=123456")
+        assert bare == with_query, (
+            f"{path} answered {bare} bare but {with_query} with a query "
+            "string; a cache-buster must not hide a route")
