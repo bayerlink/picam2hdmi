@@ -94,9 +94,13 @@
   footer { color: #57606a; font-size: .8rem; margin-top: 1rem; }
   section.below { background: #161b22; border: 1px solid #30363d;
                   border-radius: 8px; padding: .9rem; margin-top: 1rem; }
-  section.below h2 { margin: 0 0 .6rem; font-size: .8rem;
-                     text-transform: uppercase; letter-spacing: .09em;
-                     color: #8b949e; }
+  /* A frame's title looks the same wherever the frame lives -- the
+     camera pane is a .card rather than a section.below, and without
+     this it was the one frame with no title at all. */
+  section.below h2,
+  .card h2 { margin: 0 0 .6rem; font-size: .8rem;
+             text-transform: uppercase; letter-spacing: .09em;
+             color: #8b949e; }
   /* the ISP panel: widgets straight from the register map */
   #ispform details { border: 1px solid #30363d; border-radius: 6px;
                      margin: .4rem 0; padding: .1rem .6rem; }
@@ -140,18 +144,25 @@
 <main>
   <div id="left">
   <div class="card" id="pane-camera">
-    <div id="camfixed" style="color:#d29922;font-size:.85rem;margin-bottom:.6rem"
-         hidden></div>
+    <h2>Sensor</h2>
     <!-- Options are filled from the SENSOR's own mode list (see
          modeOptions); these are the fallback for a daemon that cannot
          enumerate, never the authority. -->
-    <label>sensor mode <select id="cmode"
+    <label>mode <select id="cmode"
       onchange="modeChanged(); applyFromFields()">
       <option value="1296x972">1296x972 (binned)</option>
       <option value="1920x1080">1920x1080</option>
       <option value="2592x1944">2592x1944 (full)</option>
       <option value="640x480">640x480</option></select></label>
 
+    <!-- The crop controls, as ONE unit. A bridge bench puts `crop` in
+         the daemon's `ignored` list, so every one of these is a control
+         that cannot act -- the same thing said of exposure and gain
+         before they were removed: offering it is worse than not, because
+         the picture does not change and nothing says why. Hidden rather
+         than deleted: with no bridge this daemon is the camera engine
+         and honours a crop, and the panel is the only way to draw one. -->
+    <div id="cropwrap">
     <div id="croparea">
       <div id="cropbox">
         <div class="handle h-n"  data-h="n"></div>
@@ -171,6 +182,7 @@
       <button id="win-full" onclick="windowMode(false)">Full frame</button>
       <button id="win-sel" onclick="windowMode(true)">Selection</button>
     </span>
+    </div>
   </div>
 
   <section class="below" id="bridgewrap">
@@ -269,23 +281,16 @@ function showCards() {
   if (kind === 'camera') drawCrop();
 }
 
-/* This panel has NO exposure and NO gain, by rule rather than by
- * layout: they belong to the sensor package, where the AE loop lives.
- * A field here would be a second owner of a value the loop is already
- * driving -- and a control that cannot act is worse than an absent one,
- * because the picture does not change and nothing says why. The MODE
- * stays, because geometry restarts the bridge, which is the agreed
- * price of new geometry. */
+/* What this panel offers of the sensor is its MODE, and nothing else.
+ * Exposure and gain belong to the sensor package where the AE loop
+ * lives; a crop is ignored by a bridge that owns the geometry. Rather
+ * than explain any of that in the page, the controls that cannot act
+ * are simply not there -- prose belongs in the documentation, and a
+ * frame with a title and one control says what it is without a
+ * paragraph. */
 function cameraControlsFor(owner) {
   const fixed = owner === 'bridge';
-  const note = $('camfixed');
-  if (!note) return;
-  note.hidden = !fixed;
-  note.textContent = fixed
-    ? 'The bridge owns this sensor. Exposure and gain live in the sensor '
-      + 'package with the AE loop, not here. Changing the mode restarts '
-      + 'the bridge, and the picture drops for a moment.'
-    : '';
+  if ($('cropwrap')) $('cropwrap').hidden = fixed;
 }
 
 function chooseSource(kind, id) {
@@ -325,23 +330,7 @@ function fetchCameras() {
   api('GET', '/cameras')
     .then(r => {
       cameras = r.cameras;
-      // When the bridge owns the bench, say so where the sources are
-      // chosen -- an empty list with no explanation reads as a broken
-      // page, and every source here would fail anyway: the bridge holds
-      // the camera AND the display.
-      const owned = r.owner === 'bridge';
       cameraControlsFor(r.owner);
-      let note = $('srcowner');
-      if (!note) {
-        note = document.createElement('div');
-        note.id = 'srcowner';
-        note.style.cssText = 'color:#d29922;font-size:.8rem;margin:.4rem 0';
-        $('sources').insertBefore(note, $('srclist'));
-      }
-      note.textContent = owned
-        ? 'The genlocked bridge owns the camera and the display, so it '
-          + 'is driving the picture. Sources here need it stopped.'
-        : '';
       const live = cameras.find(c => c.modes && c.modes.length);
       if (live) modeOptions(live.modes, $('cmode').value);
       renderSources();
