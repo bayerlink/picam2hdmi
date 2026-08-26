@@ -17,8 +17,24 @@ from __future__ import annotations
 
 import re
 import sys
-import tomllib
 from pathlib import Path
+
+# tomllib is 3.11+, and this project supports 3.9. Rather than skip the
+# check on the OLDEST supported version -- the one most likely to drift --
+# fall back to reading the one scalar this needs. The pattern is bounded
+# to the [project] table so a `license` key in some other table cannot
+# answer for it.
+try:
+    import tomllib
+
+    def _declared(text):
+        return (tomllib.loads(text).get("project", {}) or {}).get("license")
+except ModuleNotFoundError:                      # Python < 3.11
+    def _declared(text):
+        table = re.split(r"^\[", text, flags=re.M)
+        project = next((s for s in table if s.startswith("project]")), "")
+        found = re.search(r'^license\s*=\s*"([^"]+)"', project, re.M)
+        return found.group(1) if found else None
 
 import pytest
 
@@ -36,8 +52,7 @@ NO_COMMENT_SYNTAX = (".json",)
 
 def declared_licence() -> str:
     """The licence this project publishes under, from pyproject."""
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    licence = data.get("project", {}).get("license")
+    licence = _declared((ROOT / "pyproject.toml").read_text())
     if isinstance(licence, dict):          # the older table form
         licence = licence.get("text")
     assert licence, "pyproject.toml declares no licence to check against"
