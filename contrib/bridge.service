@@ -20,6 +20,12 @@
 # owns the bench, and a flapping unit answers "no" several times a
 # minute, whereupon something else opens the sensor. Measured on
 # 2026-08-25, after a power cut.
+#
+# A display that is not there YET is not such a refusal: at power-on the
+# board downstream boots after this Pi, so the bridge waits for its sink
+# itself, bounded at five minutes, before refusing. Waiting inside the
+# process keeps the unit running and owning the camera meanwhile; leaving
+# it to these restarts spent the whole budget in seconds.
 [Unit]
 Description=bayerlink camera bridge (sensor-genlocked HDMI source)
 After=multi-user.target

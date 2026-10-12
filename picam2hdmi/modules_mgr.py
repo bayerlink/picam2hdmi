@@ -5,12 +5,11 @@
 The bridge's algorithm seam takes source, not binaries: a package is
 a tar.gz of C files, headers and a manifest, unpacked into a SLOT
 under csrc/modules/ and compiled in by the on-device rebuild.
-Three slots exist because the responsibilities do: `isp` (a use-case's
-policy -- owns the bridge hooks and the far end's registers),
-`sensor` (a driver -- writes its own sensor's registers, carries
-its facts as data), and `algo` (an algorithm -- pure computation
-through the APIs the policy package lends it; autofocus and its
-kin). The manifests' provides/requires contracts are checked here,
+The slots are the firmware's parts: `isp` (its core -- owns the bridge
+hooks and every far-end register), `sensor` (the sensor's facts and
+fitted profile, as data), and `ae`, `awb`, `af` (each 3A loop its own
+module: computation through what the core lends it). The manifests'
+provides/requires contracts pair them. The manifests' provides/requires contracts are checked here,
 at upload, so an ABI mismatch is an HTTP 400 and never a compile
 error at three in the morning.
 
@@ -28,7 +27,7 @@ import tarfile
 
 from .native import CSRC, ensure_built
 
-SLOTS = ("isp", "sensor", "algo")
+SLOTS = ("isp", "sensor", "ae", "awb", "af")
 MAX_PACKAGE = 4 << 20
 
 
@@ -144,5 +143,9 @@ def _restart_bridge() -> bool:
                        check=False)
     if r.returncode != 0:
         return False
+    # A restart asked for is not a crash: clear the unit's start count
+    # first, or a handful of uploads in two minutes trips the limit that
+    # exists to stop a crash loop, and the bridge stays down.
+    subprocess.run(["systemctl", "reset-failed", "bridge"], check=False)
     subprocess.run(["systemctl", "restart", "bridge"], check=False)
     return True

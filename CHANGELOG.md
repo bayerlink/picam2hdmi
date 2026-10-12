@@ -7,6 +7,70 @@ what follows is a consequence of settling that.
 Pre-1.0, so the HTTP surface and the CLI can still move. Anything that
 moves is named here.
 
+## Unreleased
+
+### Added
+
+- **The mode, handed to modules, and a `mode` slot.** `--mode WxH@HZ`
+  chooses the raster from `bayerlink.rasters` (the on-device build
+  generates `rasters.h`; the bridge's own copy of the 1080p30 raster is
+  gone), and every link edge passes the mode -- raster, frame, lines --
+  to the modules. `bridge status` reports the raster.
+- **Slots for each 3A loop.** `ae`, `awb` and `af` replace the single
+  `algo` slot: each loop is its own module.
+- **The firmware is brought up at what streams.** Starting the camera
+  sends the firmware module its `init` -- the frame from `bridge status`
+  (which now reports its depth and mosaic order), the raster it rides by
+  bayerlink's numbers, the 3A settings -- and the keeper does the same
+  once per bridge run, so a module installed, a reboot or a restart does
+  not leave it waiting. `/status` carries its answer.
+- **The panel offers a rate.** Beside the sensor mode, the rates a raster
+  carries at that size (`GET /rasters`); the line budget is the chosen
+  raster's, not a fixed 2200.
+
+- **`stream --source tof`**: an Arducam ToF depth camera's raw phase
+  frames, through Arducam's SDK (which owns the sensor's configuration).
+  Its row-interleaved buffer is de-interleaved and each phase plane sent
+  as its own bayerlink frame at the sensor's geometry -- what a CSI-2
+  receiver would deliver -- with the phase in `frame_seq % 4`. Samples
+  are signed correlations, sent as unsigned with a named offset of 2**15.
+
+- **A 480p120 raster** (CEA-861 VIC 48, 54 MHz) for `stream`, for sensors
+  that read out faster than 60 frames a second: the slowest standard raster that
+  scans out that fast, a third of 720p60's data rate. Measured on a Pi 2
+  at 119.9 Hz. Sync polarity now travels with each raster -- this one is
+  negative on both, 720p and 1080p positive.
+
+### Changed
+
+- **The rasters are bayerlink's** (`bayerlink.rasters`). The proven
+  container rasters and the line-slot budget read the one table both ends
+  of a link share instead of keeping their own timings; the numbers are
+  unchanged, and 720x480 now has its budget checked too.
+
+### Fixed
+
+- **A command is read to its newline, and answered in full.** The
+  control socket took one `read` into 256 bytes and replied in 256; a
+  firmware configuration is hundreds of bytes, and arrived cut. Both are
+  2048 bytes now, the line read until its newline and the reply read to
+  the close.
+- **Uploading modules no longer stops the bridge.** Each install restarts
+  it, and six in two minutes tripped the unit's start limit, which is
+  there for crash loops; an asked-for restart clears the count first.
+
+- **A fresh Lite install builds the bridge.** `SETUP.md` and
+  `contrib/install.sh` install `python3-pip` and `libdrm-dev` by name:
+  with `--no-install-recommends` nothing else brings them, Lite ships no
+  pip, and without libdrm's headers the bridge's on-device build stopped
+  at first stream with `pkg-config cannot find libdrm`.
+
+- **The bridge waits for its display at power-on.** The board downstream
+  boots after the Pi, and the bridge used to refuse at once: the unit
+  spent its restart budget in seconds and ended `failed` with the board
+  nearly ready. It now waits up to five minutes for a connected HDMI
+  sink, saying so every 30 s, and then refuses as before.
+
 ## 0.4.0
 
 ### Added

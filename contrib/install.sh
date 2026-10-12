@@ -11,7 +11,8 @@ set -eu
 
 echo "== packages (picamera2 via apt: it carries the matching libcamera)"
 apt-get update
-apt-get install -y --no-install-recommends python3-picamera2 python3-pip curl
+apt-get install -y --no-install-recommends \
+    python3-picamera2 python3-pip libdrm-dev curl
 
 echo "== picam2hdmi (system Python: the root-run service imports it)"
 pip3 install --break-system-packages --upgrade picam2hdmi

@@ -467,3 +467,77 @@ def test_a_query_string_does_not_hide_a_route(instrument):
         assert bare == with_query, (
             f"{path} answered {bare} bare but {with_query} with a query "
             "string; a cache-buster must not hide a route")
+
+
+def test_the_firmware_is_brought_up_at_what_the_bridge_streams():
+    """The init line carries the bridge's frame, the raster it rides by
+    bayerlink's numbers -- the sensor line-locked to it -- the picture
+    centred, and the 3A settings over the defaults."""
+    from bayerlink.rasters import raster
+
+    from picam2hdmi.serve import firmware_init
+    line = firmware_init({"width": 1296, "height": 972, "bits": 10,
+                          "order": "GBRG", "raster": "1920x1080p60"},
+                         {"af": 1})
+    assert line.startswith("init ")
+    got = dict(kv.split("=") for kv in line[5:].split())
+    r = raster("1080p60")
+    assert got["frame.width"] == "1296" and got["frame.height"] == "972"
+    assert got["frame.bayer_phase"] == "2"
+    assert got["frame.line_ns"] == str(round(2200 * 1e6 / 148500))
+    assert got["frame.frame_lines"] == str(r.v_total)
+    assert got["display.pixel_khz"] == "148500"
+    assert got["display.vs_beg"] == str(r.vs_beg)
+    assert got["window.center"] == "1"
+    assert (got["aaa.ae"], got["aaa.awb"], got["aaa.af"]) == ("1", "1", "1")
+
+
+def test_the_keeper_brings_the_firmware_up_once_per_bridge_run(
+        tmp_path, monkeypatch):
+    """A bridge that restarted -- a module installed, a reboot -- leaves
+    the firmware waiting: the keeper brings it up, once for that run, and
+    leaves a firmware that has proved its build alone."""
+    from picam2hdmi import serve
+    sup = Supervisor(tmp_path, default_mode="1920x1080@30")
+    sup._persist_intent({"source": "camera", "aaa": {"af": 1}})
+    state = {"uptime": 3, "fw": "ok build=unproven frame=0x0x0"}
+    calls = []
+    monkeypatch.setattr(serve, "_bridge_owns_bench", lambda: True)
+    monkeypatch.setattr(serve, "_bridge_status",
+                        lambda: {"uptime": str(state["uptime"])})
+    monkeypatch.setattr(serve, "_bridge_command", lambda line, **k: state["fw"])
+    monkeypatch.setattr(serve, "_firmware_up",
+                        lambda aaa=None: calls.append(aaa) or "ok")
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(serve.time, "time", lambda: clock["now"])
+    assert sup.firmware_once()
+    clock["now"], state["uptime"] = 1_005.0, 8   # the same run, a beat on
+    assert not sup.firmware_once()
+    assert calls == [{"af": 1}]
+    clock["now"], state["uptime"] = 1_010.0, 1   # the bridge restarted
+    assert sup.firmware_once()
+    state["fw"] = "ok build=proven frame=1920x1080x12"
+    clock["now"], state["uptime"] = 2_000.0, 1   # and again, but it is up
+    assert not sup.firmware_once()
+    assert len(calls) == 2
+
+
+def test_the_panel_and_the_keeper_do_not_both_bring_the_firmware_up(
+        tmp_path, monkeypatch):
+    """The panel's camera start brings the firmware up; a keeper beat that
+    then still reads it unproven -- the init was in flight -- leaves the
+    run alone."""
+    from picam2hdmi import serve
+    sup = Supervisor(tmp_path, default_mode="1920x1080@30")
+    sup._persist_intent({"source": "camera"})
+    calls = []
+    monkeypatch.setattr(serve, "_bridge_owns_bench", lambda: True)
+    monkeypatch.setattr(serve, "_bridge_status", lambda: {"uptime": "4"})
+    monkeypatch.setattr(serve, "_bridge_command",
+                        lambda line, **k: "ok build=unproven")
+    monkeypatch.setattr(serve, "_firmware_up",
+                        lambda aaa=None: calls.append(aaa) or "ok")
+    monkeypatch.setattr(serve.time, "time", lambda: 500.0)
+    assert sup.firmware_now() == "ok"
+    assert not sup.firmware_once()
+    assert len(calls) == 1

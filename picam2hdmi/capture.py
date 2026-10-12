@@ -12,8 +12,8 @@ never holds a sensor register table, which is the point -- every camera
 libcamera supports works here without this tool learning anything about
 it.
 
-Auto-exposure and auto-white-balance are DISABLED by default: a raw
-source should be deterministic unless the operator asks otherwise.
+Auto-exposure and auto-white-balance are off: a raw source should be
+deterministic, and exposure and gain belong to the sensor package.
 
 Cropping is done in the PACKED domain -- a horizontal crop is a byte
 slice when it lands on packing-group boundaries, so the constraint is
@@ -27,10 +27,22 @@ $10 capture stick.
 from __future__ import annotations
 
 import numpy as np
+from bayerlink.rasters import RASTERS
 
-# Total line slots (active + blanking) of the display modes the bench
-# uses; the receiver rate rule is samples <= slots (PROTOCOL.md).
-LINE_SLOTS = {(1920, 1080): 2200, (1280, 720): 1650, (640, 480): 800}
+
+def _line_slots() -> dict:
+    slots = {}
+    for r in RASTERS.values():
+        size = (r.h_active, r.v_active)
+        slots[size] = min(slots.get(size, r.h_total), r.h_total)
+    return slots
+
+
+# Total line slots (active + blanking) of each display size, from
+# bayerlink's rasters; the receiver rate rule is samples <= slots (the
+# bayerlink spec). A size several rasters scan is held to the shortest
+# line among them.
+LINE_SLOTS = _line_slots()
 
 
 def order_from_format(fmt: str) -> tuple[str | None, int]:

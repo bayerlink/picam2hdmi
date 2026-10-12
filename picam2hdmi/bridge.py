@@ -34,12 +34,12 @@ No libcamera anywhere: the kernel's own sensor driver carries the init,
 media-ctl plumbs the graph, and the FPGA on the far end is the ISP --
 which is the whole premise of the system this feeds.
 
-Rates: the sensor free-runs near the mode's rate and the display near
-30Hz, on unrelated crystals. Unsteered, the write beam laps the read
-beam slowly and a tear seam drifts through the picture -- visible,
-honest, and the measurement the genlock loop will close on. This first
-version STATES the drift rather than hiding it; `--vblank` is the
-manual trim, and the closed loop is the next commit's job.
+Rates: the sensor runs on the camera module's own oscillator and the
+display on the Pi's crystal, so the two drift apart. Unsteered, the write
+beam laps the read beam slowly and a tear seam drifts through the
+picture. This Python prototype does not steer them -- `--vblank` is a
+manual trim; the genlocked daemon, csrc/bridge.c, phase-locks the output
+to the sensor every frame (GENLOCK.md).
 
     python3 -m picam2hdmi.bridge --seconds 30
 """

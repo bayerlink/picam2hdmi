@@ -36,7 +36,8 @@ On the Pi:
 
 ```sh
 sudo apt update
-sudo apt install -y python3-picamera2 --no-install-recommends
+sudo apt install -y --no-install-recommends \
+    python3-picamera2 python3-pip libdrm-dev
 sudo pip3 install --break-system-packages picam2hdmi
 ```
 
@@ -44,6 +45,12 @@ sudo pip3 install --break-system-packages picam2hdmi
 libcamera for your OS release. The `--break-system-packages` flag is
 Bookworm's required acknowledgement for installing into the system
 Python, which is where a root-run service needs it.
+
+The other two are named because `--no-install-recommends` means nothing
+else will bring them. Lite ships no pip at all. And the bridge is compiled
+on the device it runs on, against libdrm — without the headers the build
+stops with `pkg-config cannot find libdrm`, and it stops at first stream
+rather than here, which is a long way from the command that caused it.
 
 Or run the same three commands via the installer, which also installs
 and enables the systemd unit from step 4:
@@ -96,7 +103,9 @@ port 8080:
 - **Panel**: http://picam.local:8080 — source tabs, live camera view in
   a draggable crop box (release applies it, no restart), recordings.
 - **API**: `GET /status`, `PUT /source`, `GET|PUT|DELETE /recordings/…`,
-  `GET /preview.png` — same refusals as the CLI, as HTTP 400s.
+  `GET /preview.png`, `GET|PUT|DELETE /modules/<slot>`, `PUT /power` —
+  same refusals as the CLI, as HTTP 400s; the full list is in
+  `serve.py`'s docstring.
 
 ```sh
 curl http://picam.local:8080/status
@@ -115,6 +124,9 @@ pulled plugs); switching power back on brings everything back.
 
 ## 5. If something misbehaves
 
+- **`bridge: no display connected yet`** — the HDMI sink is not up yet
+  (the board downstream may boot after the Pi). The bridge waits five
+  minutes for it, then refuses, and the unit ends `failed`.
 - **`main.py: DRM master` / modeset errors** — a desktop session owns
   the display. Use OS Lite, or stop the display manager.
 - **Near-black or blown camera frames** — the sensor's own AE and AGC are

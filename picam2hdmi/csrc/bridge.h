@@ -31,16 +31,40 @@ struct bridge_frame {
 
 void bridge_frame_hook(const struct bridge_frame *f);
 
+/* A display raster: totals, active area, sync windows and polarities,
+ * pixel clock -- one row of bayerlink.rasters, which the on-device
+ * build generates into rasters.h, so C keeps no copy of its own.
+ * Positions count from the first active pixel (line). */
+struct bridge_raster {
+    const char *name;       /* "1920x1080p30" */
+    uint32_t pixel_khz;
+    uint32_t h_total, v_total, h_active, v_active;
+    uint32_t hs_beg, hs_end, vs_beg, vs_end;
+    uint8_t hsync_positive, vsync_positive;
+    uint32_t hz;            /* to the nearest whole frame */
+};
+
+/* The MODE: what this run scans out and what it carries. The raster
+ * is the link's; the frame is the sensor's, sitting inside it, with
+ * the header row above -- `lines` active lines on the wire. */
+struct bridge_mode {
+    const struct bridge_raster *raster;
+    uint32_t width, height;     /* the sensor's frame */
+    uint32_t lines;             /* active lines scanned: height + header */
+};
+
 /* The LINK hook: called once after start-up with the initial state,
  * and again on every HDMI hot-plug edge. This is where a module
  * reloads the far end -- the receiver forgets its registers when
  * the cable or its power goes, and the sensor's owner is the one
  * who knows what to write back. `edid` is the sink's EDID (256
  * bytes) when the link is up and readable, else NULL; a module can
- * recognise its far end there before touching a register. */
+ * recognise its far end there before touching a register. `mode`
+ * is this run's, always set. */
 struct bridge_link {
     int up;
     const uint8_t *edid;    /* 256 bytes, or NULL */
+    const struct bridge_mode *mode;
 };
 
 void bridge_link_hook(const struct bridge_link *l);

@@ -3,23 +3,34 @@
 """The source as a bench instrument: a control daemon over HTTP.
 
 Lab instruments have always had control ports; HTTP + JSON is today's
-SCPI. This daemon owns the scanout and listens for three things:
+SCPI. This daemon owns the scanout and listens on:
 
     GET  /                    the panel: a phone-friendly control page
     GET  /status              what is streaming, and how it is going
-    PUT  /source              switch source: pattern, a recording, or off
+    PUT  /source              switch source: pattern, camera, a recording,
+                              or off
+    GET  /cameras             the cameras libcamera sees
     GET  /preview.png         what is being EMITTED, as an image;
                               ?recording=<name> to look inside the spool
     GET  /recordings          list the spool
     PUT  /recordings/<name>   upload a recording (.npy of containers)
     GET  /recordings/<name>   download it back, byte-identical
     DELETE /recordings/<name> remove it
-    GET  /modules             the two module slots' manifests
-    PUT  /modules/<slot>      upload a package (tar.gz): isp or sensor;
+    GET  /modules             the module slots' manifests
+    GET  /rasters             bayerlink's rasters: timings, clock, rate
+    PUT  /modules/<slot>      upload a package (tar.gz): isp, sensor,
+                              ae, awb or af;
                               validated, compiled in, bridge restarted
     DELETE /modules/<slot>    remove it and rebuild plain
     PUT  /power               {"off": true} -> clean shutdown; instruments
                               have power buttons, and SD cards prefer them
+    GET  /bridge/status       the bridge's own state, on a bridge bench
+    GET  /bridge/preview.png  what the bridge is sending
+    GET  /isp/params          the ISP package's register map, as widgets
+    GET  /isp/values          what is set
+    POST /isp/set             set one value through the ISP package
+    POST /isp/commit          land the batch at a frame boundary
+    POST /capture             grab what is being sent
 
 Like a bench instrument, it RETAINS STATE: every accepted source spec
 is persisted in the spool, and (unless --no-autostart) the daemon boots
@@ -128,6 +139,11 @@ class Supervisor:
         # True while the source runs WITHOUT a display: framing,
         # focusing, setting exposure -- everything but the wire.
         self.monitoring = False
+        # When the bridge run the firmware was last brought up for
+        # began: once per run, never on every beat.
+        self._firmware_run = None
+        self._firmware_lock = threading.Lock()
+        self.firmware = None               # its last answer, for status
 
     # -- facts ---------------------------------------------------------------
 
@@ -141,6 +157,8 @@ class Supervisor:
             "intent": self.stored_spec() or {"source": "off"},
             "running": alive,
             "derived_container": self.derived,
+            # the firmware's answer the last time it was brought up
+            "firmware": self.firmware,
             # Whether the WIRE is being driven: False while idle, and
             # False in monitor mode -- the panel says so instead of
             # letting a live viewfinder imply a fed receiver.
@@ -402,11 +420,53 @@ class Supervisor:
             self.last_error = f"waiting to start: {error}"
             return False
 
+    def firmware_once(self) -> bool:
+        """One keeper beat for the firmware: while the bridge streams the
+        camera, bring the firmware up if it has not proved its build in
+        this bridge run -- a module installed, a reboot, a bridge that
+        restarted all leave it waiting for an init. Tried once per run:
+        a firmware that refuses says why in status, not every beat."""
+        desired = self.stored_spec() or {}
+        if desired.get("source") != "camera" or not _bridge_owns_bench():
+            return False
+        try:
+            status = _bridge_status()
+            fw = _bridge_command("status")
+        except OSError:
+            return False                   # still building or starting
+        if not fw.startswith("ok ") or " build=proven" in fw:
+            return False                   # no firmware, or already up
+        run = round(time.time() - float(status.get("uptime", 0)))
+        return self.firmware_now(desired.get("aaa"), run, once=True) is not None
+
+    def firmware_now(self, aaa: dict | None = None, run: int | None = None,
+                     once: bool = False) -> str | None:
+        """Bring the firmware up now: the panel's camera start and the
+        keeper share this, under one lock, and both mark the bridge run
+        as done. With `once`, a run already done is left alone -- checked
+        under the lock, so a keeper beat that read "unproven" while the
+        panel's init was in flight does not bring it up a second time.
+        None when nothing was done."""
+        with self._firmware_lock:
+            if (once and run is not None and self._firmware_run is not None
+                    and abs(run - self._firmware_run) <= 2):
+                return None
+            if run is None:
+                try:
+                    status = _bridge_status()
+                    run = round(time.time() - float(status.get("uptime", 0)))
+                except (OSError, ValueError):
+                    run = None
+            self._firmware_run = run
+            self.firmware = _firmware_up(aaa)
+            return self.firmware
+
     def keep(self, interval: float = 5.0) -> None:
         """Run revive_once forever, gently, in the background."""
         def beat():
             while True:
                 time.sleep(interval)
+                self.firmware_once()
                 self.revive_once()
         threading.Thread(target=beat, daemon=True).start()
 
@@ -579,7 +639,7 @@ def _chain(first, rest):
 # HTTP surface
 # ----------------------------------------------------------------------------- #
 
-def _bridge_command(line: str) -> str:
+def _bridge_command(line: str, timeout: float = 2.0) -> str:
     """One command over the bridge's control socket, one reply.
 
     The bridge owns the far-end register channel and the module in it
@@ -589,13 +649,73 @@ def _bridge_command(line: str) -> str:
     import socket as sockets
 
     s = sockets.socket(sockets.AF_UNIX, sockets.SOCK_STREAM)
-    s.settimeout(2.0)
+    s.settimeout(timeout)
     try:
         s.connect("/run/bridge.sock")
         s.sendall(line.encode() + b"\n")
-        return s.recv(4096).decode(errors="replace").strip()
+        # the reply is one write, closed after: read to the close, since
+        # one recv returns what has arrived, not what was sent
+        reply = b""
+        while chunk := s.recv(4096):
+            reply += chunk
+        return reply.decode(errors="replace").strip()
     finally:
         s.close()
+
+
+# 3A as the panel starts it: exposure and white balance run, focus waits
+# for a lens that asks for it. Each is a parameter of the firmware's
+# configuration, never a loop of this daemon's.
+AAA_DEFAULT = {"ae": 1, "awb": 1, "af": 0}
+
+
+def firmware_init(status: dict, aaa: dict | None = None) -> str:
+    """The firmware's `init` for what the bridge streams: its frame (from
+    `bridge status`), the display raster it rides (bayerlink's, by the
+    name the bridge reports), the picture centred, and the 3A settings.
+    The firmware keeps no table of modes; this is where the knowledge
+    lives. The bridge line-locks the sensor to the raster, so the
+    sensor's line is the raster's and its frame the raster's total."""
+    from bayerlink.protocol import BAYER_PHASE
+    from bayerlink.rasters import raster
+
+    r = raster(status["raster"])
+    fields = {
+        "frame.width": status["width"], "frame.height": status["height"],
+        "frame.bits": status["bits"],
+        "frame.bayer_phase": BAYER_PHASE[status["order"]],
+        "frame.line_ns": round(r.h_total * 1e6 / r.pixel_khz),
+        "frame.frame_lines": r.v_total,
+        **{f"display.{f}": int(getattr(r, f)) for f in (
+            "pixel_khz", "h_total", "v_total", "h_active", "v_active",
+            "hs_beg", "hs_end", "vs_beg", "vs_end", "hsync_positive",
+            "vsync_positive")},
+        "window.center": 1,
+        **{f"aaa.{k}": int(v) for k, v in {**AAA_DEFAULT,
+                                            **(aaa or {})}.items()},
+    }
+    return "init " + " ".join(f"{k}={v}" for k, v in fields.items())
+
+
+def _bridge_status() -> dict:
+    """`bridge status`, as a dict of its fields."""
+    r = _bridge_command("bridge status")
+    if not r.startswith("ok "):
+        raise OSError(r)
+    return dict(t.split("=", 1) for t in r[3:].split() if "=" in t)
+
+
+def _firmware_up(aaa: dict | None = None) -> str:
+    """Bring the firmware up at what the bridge streams; its reply, or
+    why it could not be asked."""
+    try:
+        status = _bridge_status()
+        line = firmware_init({**status, "width": int(status["width"]),
+                              "height": int(status["height"]),
+                              "bits": int(status["bits"])}, aaa)
+        return _bridge_command(line, timeout=15.0)
+    except (OSError, KeyError, ValueError) as error:
+        return f"err {error}"
 
 
 def _sensors_from_sysfs() -> list:
@@ -1001,6 +1121,12 @@ def _handler(supervisor: Supervisor):
             if route == "/modules":
                 from . import modules_mgr
                 return self._send(200, modules_mgr.status())
+            if route == "/rasters":
+                # bayerlink's rasters, for the panel to offer the rates
+                # a frame can ride and to state the line budget
+                from bayerlink.rasters import RASTERS
+                return self._send(200, {name: {**r._asdict(), "hz": r.hz}
+                                        for name, r in RASTERS.items()})
             if route == "/bridge/status":
                 # The bridge is the real-time owner on this bench: it
                 # holds the sensor and the display and keeps the picture
@@ -1245,17 +1371,22 @@ def _handler(supervisor: Supervisor):
                         # it sits inside it and the header carries the
                         # truth. Disturbing the picture is the agreed
                         # price of changing geometry.
+                        # The mode is [width, height] or [width, height,
+                        # rate]; the rate picks the raster, so it is part
+                        # of what is compared.
                         mode = spec.get("cam_mode")
-                        if mode and len(mode) == 2:
-                            want = f"{int(mode[0])}x{int(mode[1])}"
+                        if mode and len(mode) in (2, 3):
+                            hz = int(mode[2]) if len(mode) == 3 else None
+                            want = (f"{int(mode[0])}x{int(mode[1])}"
+                                    + (f"@{hz}" if hz else ""))
                             now = ""
                             try:
-                                r = _bridge_command("bridge status")
-                                fields = dict(
-                                    t.split("=", 1) for t in r[3:].split()
-                                    if "=" in t)
+                                fields = _bridge_status()
                                 now = f"{fields.get('width')}x{fields.get('height')}"
-                            except OSError:
+                                if hz:
+                                    from bayerlink.rasters import raster
+                                    now += f"@{raster(fields['raster']).hz}"
+                            except (OSError, KeyError):
                                 pass
                             if want != now:
                                 env = Path("/run/bridge.env")
@@ -1290,7 +1421,14 @@ def _handler(supervisor: Supervisor):
                                             supervisor.spool)
                         except ValueError as error:
                             return self._send(400, {"error": str(error)})
-                        supervisor._persist_intent({"source": "camera"})
+                        intent = {"source": "camera"}
+                        if spec.get("aaa"):
+                            intent["aaa"] = spec["aaa"]
+                        supervisor._persist_intent(intent)
+                        # the firmware, brought up at what now streams:
+                        # the bridge replays it on every link edge after,
+                        # and the keeper counts this run as done
+                        supervisor.firmware_now(spec.get("aaa"))
                         status = supervisor.status()
                         if ignored:
                             status["ignored"] = {

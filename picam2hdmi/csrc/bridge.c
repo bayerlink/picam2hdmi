@@ -51,6 +51,7 @@
 
 #include <linux/media-bus-format.h>
 #include "bridge.h"
+#include "rasters.h"
 #include <linux/v4l2-subdev.h>
 #include <linux/videodev2.h>
 
@@ -62,11 +63,10 @@
  * each had to be refused. A frame smaller than the raster simply sits
  * inside it -- the header states the true width and height, and a
  * receiver that takes its geometry from the stream crops correctly. */
-#define RASTER_W 1920
-#define RASTER_H 1080
-static uint32_t WIDTH  = RASTER_W;    /* the sensor's, until asked   */
-static uint32_t HEIGHT = RASTER_H;
-#define VDISP  (RASTER_H + 1)          /* + the header row            */
+static const struct bridge_raster *RASTER;  /* the link's, chosen at start */
+static uint32_t WIDTH  = 1920;        /* the sensor's, until asked   */
+static uint32_t HEIGHT = 1080;
+static uint32_t VDISP;                 /* the raster's active + the header row */
 #define BL_MAGIC  0x4B4C5942u          /* "BYLK"                      */
 
 /* The header's fourcc DECLARES the mosaic order. For ov5647 1080p
@@ -181,20 +181,49 @@ static int order_given;                     /* --order beats discovery */
  * link's register channel, not by being guessed from this number. */
 #define SOURCE_ID_OV5647 0
 
-/* The 1080p30 raster, from kms.py's _RASTERS -- one owner, restated
- * here because C cannot import it; `make check` cannot hold a modeline,
- * so a comment holds the pointer instead. */
-static drmModeModeInfo MODE = {
-    .clock = 74250,
-    .hdisplay = RASTER_W, .hsync_start = 2008, .hsync_end = 2052,
-    .htotal = 2200,
-    .vdisplay = RASTER_H + 1, .vsync_start = 1084, .vsync_end = 1089,
-    .vtotal = 1125,
-    .vrefresh = 30,
-    .flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC,
-    .type = DRM_MODE_TYPE_USERDEF,
-    .name = "bayerlink1081",
-};
+/* The modeline scanned out: the chosen raster VERBATIM, claiming one
+ * more active line than it has -- the header row -- inside its own
+ * vertical blanking (kms.py's container: both ends are ours, and the
+ * receiver counts data-enable rather than reading mode names). */
+static drmModeModeInfo MODE;
+static struct bridge_mode BMODE;
+
+/* The raster a WxH frame at HZ rides: one whose active width holds the
+ * frame and whose lines hold it and its header row before the vertical
+ * sync, at that rate, the slowest such -- the least the link has to
+ * carry. NULL: none does. */
+static const struct bridge_raster *pick_raster(uint32_t w, uint32_t h,
+                                               uint32_t hz) {
+    const struct bridge_raster *best = NULL;
+    for (size_t i = 0; i < BRIDGE_N_RASTERS; i++) {
+        const struct bridge_raster *r = &BRIDGE_RASTERS[i];
+        if (r->hz != hz || w > r->h_active || h + 1 >= r->vs_beg) continue;
+        if (!best || r->pixel_khz < best->pixel_khz) best = r;
+    }
+    return best;
+}
+
+static void set_raster(const struct bridge_raster *r) {
+    RASTER = r;
+    VDISP = r->v_active + 1;
+    memset(&MODE, 0, sizeof MODE);
+    MODE.clock = r->pixel_khz;
+    MODE.hdisplay = r->h_active;
+    MODE.hsync_start = r->hs_beg;
+    MODE.hsync_end = r->hs_end;
+    MODE.htotal = r->h_total;
+    MODE.vdisplay = VDISP;
+    MODE.vsync_start = r->vs_beg;
+    MODE.vsync_end = r->vs_end;
+    MODE.vtotal = r->v_total;
+    MODE.vrefresh = r->hz;
+    MODE.flags = (r->hsync_positive ? DRM_MODE_FLAG_PHSYNC
+                                    : DRM_MODE_FLAG_NHSYNC)
+               | (r->vsync_positive ? DRM_MODE_FLAG_PVSYNC
+                                    : DRM_MODE_FLAG_NVSYNC);
+    MODE.type = DRM_MODE_TYPE_USERDEF;
+    snprintf(MODE.name, sizeof MODE.name, "bayerlink%u", (unsigned)VDISP);
+}
 
 static volatile sig_atomic_t running = 1;
 static void on_sig(int sig) { (void)sig; running = 0; }
@@ -433,10 +462,13 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
         }
         snprintf(reply, cap,
                  "ok seq=%u locked=%d paused=%d source=%s "
-                 "width=%u height=%u phase=%.2f margin=%.0f "
+                 "width=%u height=%u bits=%d order=%s raster=%s "
+                 "phase=%.2f margin=%.0f "
                  "vblank=%d uptime=%ld exposure=%d gain=%d",
                  bstate.seq, bstate.locked, paused,
-                 clip_map ? "clip" : "sensor", WIDTH, HEIGHT, bstate.phase,
+                 clip_map ? "clip" : "sensor", WIDTH, HEIGHT,
+                 FORMATS[fmt_row].bits, FORMATS[fmt_row].order,
+                 RASTER ? RASTER->name : "-", bstate.phase,
                  bstate.margin,
                  bstate.vblank,
                  bstate.started ? (long)(time(NULL) - bstate.started) : 0L,
@@ -583,11 +615,21 @@ static void ctl_poll(void) {
     if (ctl_fd < 0) return;
     int c = accept4(ctl_fd, NULL, NULL, SOCK_NONBLOCK);
     if (c < 0) return;
-    char cmd[256], reply[256];
-    ssize_t n = read(c, cmd, sizeof cmd - 1);
-    if (n < 0) {
+    /* One line, read to its newline: a configuration is hundreds of
+     * bytes, and one read() of a socket returns what has arrived, not
+     * what was sent. Bounded twice -- by the buffer and by the wait. */
+    char cmd[2048], reply[2048];
+    ssize_t n = 0;
+    for (int waits = 0; n < (ssize_t)sizeof cmd - 1 && waits < 20;) {
+        ssize_t got = read(c, cmd + n, sizeof cmd - 1 - n);
+        if (got > 0) {
+            n += got;
+            if (memchr(cmd, '\n', n)) break;
+            continue;
+        }
+        if (got == 0) break;                    /* the caller is done */
         struct pollfd p = {.fd = c, .events = POLLIN};
-        if (poll(&p, 1, 5) > 0) n = read(c, cmd, sizeof cmd - 1);
+        if (poll(&p, 1, 5) <= 0) waits++;
     }
     if (n > 0) {
         while (n && (cmd[n - 1] == '\n' || cmd[n - 1] == '\r')) n--;
@@ -615,7 +657,10 @@ static void link_watch(int force) {
     if (up == last && !force) return;
     last = up;
     if (up) ddc_probe(conn_dir);
-    struct bridge_link l = { .up = up, .edid = up ? edid : NULL };
+    BMODE = (struct bridge_mode){ .raster = RASTER, .width = WIDTH,
+                                  .height = HEIGHT, .lines = VDISP };
+    struct bridge_link l = { .up = up, .edid = up ? edid : NULL,
+                             .mode = &BMODE };
     printf("bridge: link %s\n", up ? "up" : "down");
     bridge_link_hook(&l);
 }
@@ -876,7 +921,7 @@ int main(int argc, char **argv) {
      * start-up already does correctly. The frame need only fit the
      * raster -- it sits inside it, and the header tells the receiver
      * the truth. */
-    unsigned want_w = 0, want_h = 0;
+    unsigned want_w = 0, want_h = 0, want_hz = 30;
     const char *want_order = NULL;
     int test_pattern = 0, selftest = 0;
     const char *video = NULL, *subdev = "/dev/v4l-subdev0";
@@ -891,8 +936,10 @@ int main(int argc, char **argv) {
             want_order = argv[++i];
         }
         else if (!strcmp(argv[i], "--mode")) {
-            if (sscanf(argv[++i], "%ux%u", &want_w, &want_h) != 2) {
-                fprintf(stderr, "bridge: --mode wants WxH, e.g. 1296x972\n");
+            int n = sscanf(argv[++i], "%ux%u@%u", &want_w, &want_h, &want_hz);
+            if (n != 2 && n != 3) {
+                fprintf(stderr, "bridge: --mode wants WxH[@HZ], e.g. "
+                        "1296x972 or 1920x1080@60\n");
                 return 1;
             }
         }
@@ -902,6 +949,21 @@ int main(int argc, char **argv) {
     }
     crc_init();
     setvbuf(stdout, NULL, _IOLBF, 0);   /* notes must land, not pool */
+    {
+        uint32_t w = want_w ? want_w : WIDTH, h = want_h ? want_h : HEIGHT;
+        const struct bridge_raster *r = pick_raster(w, h, want_hz);
+        if (!r) {
+            fprintf(stderr, "bridge: no raster carries %ux%u at %u Hz; "
+                    "the rasters are:", w, h, want_hz);
+            for (size_t i = 0; i < BRIDGE_N_RASTERS; i++)
+                fprintf(stderr, " %s", BRIDGE_RASTERS[i].name);
+            fprintf(stderr, "\n");
+            return 1;
+        }
+        set_raster(r);
+        if (!selftest)
+            printf("bridge: raster %s for a %ux%u frame\n", r->name, w, h);
+    }
 
     if (selftest) {
         /* `make check` compares these bytes with the Python reference:
@@ -967,39 +1029,62 @@ int main(int argc, char **argv) {
     if (dfd < 0) die("open dri");
     drmSetClientCap(dfd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
 
-    drmModeResPtr res = drmModeGetResources(dfd);
-    if (!res) die("GetResources");
+    /* The sink may not be there YET. At power-on the board downstream
+     * boots and loads its bitstream a minute or two after this Pi, and
+     * until it does there is no HDMI sink to drive. Refusing at once
+     * left the unit to burn its restart budget in seconds and end
+     * `failed` with the board seconds from ready. So a missing display
+     * is waited for -- BOUNDED, because one that never comes is the
+     * refusal it always was, and the unit must still end `failed`
+     * rather than wait forever. While it waits the bridge is running
+     * and owns the camera, which is the truth. */
+    enum { DISPLAY_WAIT_S = 300, DISPLAY_REPORT_S = 30 };
     uint32_t connector_id = 0, crtc_id = 0;
     int crtc_index = 0;
-    for (int i = 0; i < res->count_connectors && !connector_id; i++) {
-        drmModeConnectorPtr c = drmModeGetConnector(dfd, res->connectors[i]);
-        if (c && c->connection == DRM_MODE_CONNECTED) {
-            connector_id = c->connector_id;
-            /* The CRTC comes from the connector's ENCODERS' mask --
-             * never from a guess. An all-ones fallback once picked
-             * CRTC 0, which on vc4 is txp, the writeback engine: a
-             * perfectly real CRTC that can never drive HDMI, and an
-             * EINVAL that names no names. The encoder knows which
-             * CRTCs can reach the wire; ask it. */
-            uint32_t possible = 0;
-            for (int j = 0; j < c->count_encoders; j++) {
-                drmModeEncoderPtr e =
-                    drmModeGetEncoder(dfd, c->encoders[j]);
-                if (!e) continue;
-                if (e->crtc_id && !crtc_id) crtc_id = e->crtc_id;
-                possible |= e->possible_crtcs;
-                drmModeFreeEncoder(e);
-            }
-            for (int k = 0; k < res->count_crtcs; k++)
-                if (crtc_id ? res->crtcs[k] == crtc_id
-                            : (possible & (1u << k))) {
-                    crtc_id = res->crtcs[k]; crtc_index = k; break;
+    for (int waited = 0;; waited++) {
+        drmModeResPtr res = drmModeGetResources(dfd);
+        if (!res) die("GetResources");
+        for (int i = 0; i < res->count_connectors && !connector_id; i++) {
+            drmModeConnectorPtr c =
+                drmModeGetConnector(dfd, res->connectors[i]);
+            if (c && c->connection == DRM_MODE_CONNECTED) {
+                connector_id = c->connector_id;
+                /* The CRTC comes from the connector's ENCODERS' mask --
+                 * never from a guess. An all-ones fallback once picked
+                 * CRTC 0, which on vc4 is txp, the writeback engine: a
+                 * perfectly real CRTC that can never drive HDMI, and an
+                 * EINVAL that names no names. The encoder knows which
+                 * CRTCs can reach the wire; ask it. */
+                uint32_t possible = 0;
+                for (int j = 0; j < c->count_encoders; j++) {
+                    drmModeEncoderPtr e =
+                        drmModeGetEncoder(dfd, c->encoders[j]);
+                    if (!e) continue;
+                    if (e->crtc_id && !crtc_id) crtc_id = e->crtc_id;
+                    possible |= e->possible_crtcs;
+                    drmModeFreeEncoder(e);
                 }
+                for (int k = 0; k < res->count_crtcs; k++)
+                    if (crtc_id ? res->crtcs[k] == crtc_id
+                                : (possible & (1u << k))) {
+                        crtc_id = res->crtcs[k]; crtc_index = k; break;
+                    }
+            }
+            drmModeFreeConnector(c);
         }
-        drmModeFreeConnector(c);
-    }
-    if (!connector_id || !crtc_id) {
-        fprintf(stderr, "no connected connector/CRTC\n"); return 1;
+        drmModeFreeResources(res);
+        if (connector_id && crtc_id) break;
+        connector_id = crtc_id = 0;
+        crtc_index = 0;
+        if (waited >= DISPLAY_WAIT_S) {
+            fprintf(stderr, "no connected connector/CRTC after %d s\n",
+                    DISPLAY_WAIT_S);
+            return 1;
+        }
+        if (waited % DISPLAY_REPORT_S == 0)
+            printf("bridge: no display connected yet -- waiting for the "
+                   "sink (%d s of %d)\n", waited, DISPLAY_WAIT_S);
+        sleep(1);
     }
     force_full_range(dfd, connector_id);
 
@@ -1049,11 +1134,11 @@ int main(int argc, char **argv) {
         uint32_t dw = WIDTH, dh = HEIGHT;
         int drow = fmt_row;
         if (discover_sensor(sfd, &dw, &dh, &drow)) {
-            if (dw > RASTER_W || dh + 1 > VDISP) {
+            if (dw > RASTER->h_active || dh + 1 >= RASTER->vs_beg) {
                 fprintf(stderr, "bridge: the sensor is sending %ux%u, which "
-                        "does not fit the %ux%u raster this link "
-                        "advertises. Choose a smaller sensor mode.\n",
-                        dw, dh, (unsigned)RASTER_W, (unsigned)VDISP);
+                        "does not fit the %s raster chosen for the mode "
+                        "asked. Choose a smaller sensor mode.\n",
+                        dw, dh, RASTER->name);
                 return 1;
             }
             WIDTH = dw;

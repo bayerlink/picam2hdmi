@@ -6,7 +6,7 @@ FPGA boards rarely have a camera connector, but nearly all of them have
 HDMI-in. A Raspberry Pi has the opposite: a first-class camera stack — every
 sensor libcamera supports, drivers, modes, controls — and an HDMI output.
 picam2hdmi turns the Pi into a **sensor module with an HDMI plug**: raw
-12-bit Bayer frames, straight from the sensor's CSI-2 output with the ISP
+Bayer frames at the sensor's own bit depth, straight from the sensor's CSI-2 output with the ISP
 bypassed, carried over the display link as bytes and self-described by a
 header line.
 
@@ -45,6 +45,7 @@ print(header.bayer_order, header.width, header.height, header.frame_seq)
 | CLI: pattern → container file | **done** |
 | KMS scanout (double-buffered, full-range RGB forced) | **working** — pure ctypes DRM, proven on the bench |
 | Picamera2 raw capture | **working** — the sensor's packed bytes ride to the wire verbatim; crop, and every libcamera camera unseen. Exposure and gain are not set here: they belong to the sensor package, where the AE loop lives |
+| ToF raw phases | **working** — `stream --source tof`: an Arducam ToF camera's four phase planes, one bayerlink frame each, the phase in `frame_seq % 4` |
 | Instrument mode | **working** — `picam2hdmi serve`: HTTP control, recordings spool, a control panel and a power button; the last source is restored at boot (`contrib/picam2hdmi.service`). On a bridge bench the panel offers what the bridge can act on and nothing else — geometry, exposure and gain all belong elsewhere |
 | Genlocked bridge | **working** — `picam2hdmi bridge`: the C daemon, sensor lines onto the wire in lines, output phase-locked to the sensor so latency is lines and no frame is shown twice or dropped (`contrib/bridge.service`) |
 | Module slots | **working** — C packages uploaded from the panel and compiled into the bridge: `isp` (policy: the bridge hooks and the far end's registers), `sensor` (a driver), `algo` (pure computation) |
@@ -80,6 +81,10 @@ sudo picam2hdmi bridge                 # the genlocked source: sensor -> wire
 sudo picam2hdmi serve                  # instrument: panel + HTTP on :8080
 ```
 
+At power-on the bridge waits for its HDMI sink -- the board downstream may
+boot later than the Pi -- for up to five minutes, saying so every 30 s,
+and then refuses.
+
 ## Modules: someone else's algorithm, running on this Pi
 
 The bridge is generic and stays that way — it knows frames, links and
@@ -95,12 +100,16 @@ replaced by another of its own kind:
 | `sensor` | a driver: writes its own sensor's controls, carries the sensor's facts as data |
 | `algo` | pure computation, reaching hardware only through what the policy package lends it |
 
-The seam is four weak symbols in [`csrc/bridge.h`](picam2hdmi/csrc/bridge.h):
-per-frame, on every HDMI hot-plug edge (with the sink's EDID, so a module
-can recognise its far end before touching it), the cable's own register
-channel, and one text command from the panel. Packages declare what they
-provide and require; the set is checked at upload, so a mismatch is an
-HTTP 400 rather than a compile error at three in the morning.
+The seam is three weak hooks in [`csrc/bridge.h`](picam2hdmi/csrc/bridge.h)
+-- per-frame, on every HDMI hot-plug edge (with the sink's EDID, so a
+module can recognise its far end before touching it), and one text
+command from the panel -- plus the cable's own register channel, which
+the bridge lends them. Packages declare what they provide and require;
+the set is checked at upload, so a mismatch is an HTTP 400 rather than a
+compile error at three in the morning. Because each upload is checked
+against the package already in the other slot, moving both to a new
+interface version takes three steps: `DELETE /modules/sensor`, then
+upload the ISP package, then the sensor package.
 
 A first-class use of this is an ISP on the far end of the cable:
 [revela](https://github.com/lanserge/revela) generates both packages —
@@ -114,7 +123,7 @@ The link must deliver bytes unmodified: **full-range RGB, no scaling, no
 overscan, RGB 4:4:4**. The most common failure is a limited-range clamp
 (16–235) quietly destroying sample values; the `checker` and `corners`
 patterns exist to catch exactly that on day one. Details and the receiver
-rate rule are in [PROTOCOL.md](PROTOCOL.md). The frame count is kept
+rate rule are in the [bayerlink spec](https://github.com/bayerlink/bayerlink). The frame count is kept
 exact too: the bridge genlocks the HDMI output to the sensor so every
 captured frame leaves the cable exactly once — why and how in
 [GENLOCK.md](GENLOCK.md).

@@ -31,6 +31,8 @@ import mmap as _mmap
 import os
 from dataclasses import dataclass
 
+from bayerlink.rasters import raster
+
 # --------------------------------------------------------------------------- #
 # uapi structs (drm.h / drm_mode.h), sizes pinned by tests
 # --------------------------------------------------------------------------- #
@@ -218,25 +220,46 @@ FORMAT_RG24 = fourcc("RG24")
 FORMAT_XR24 = fourcc("XR24")
 
 
-# Proven scanout rasters: the pixel clock and sync positions of the two
-# CEA modes every budget in PROTOCOL.md was brought up on. A CONTAINER
-# mode keeps a raster VERBATIM and claims a different active window
-# inside it -- the private-link case, where both ends are ours, the
-# receiver counts DE rather than reading mode names, and EDID has no
-# vote. The active window must end before the sync it borrows.
-#   (clock kHz, hs_start, hs_end, htotal, vs_start, vs_end, vtotal, hz)
-_RASTERS = (
-    (74250, 1390, 1430, 1650, 725, 730, 750, 60),      # the 720p60 raster
-    (74250, 2008, 2052, 2200, 1084, 1089, 1125, 30),   # the 1080p30 raster
-)
 _FLAG_PHSYNC = 0x1
 _FLAG_PVSYNC = 0x4
+# Proven scanout rasters: the CEA modes every budget in the bayerlink spec
+# was brought up on, by name -- their timings are bayerlink's, the one
+# table both ends of a link read. A CONTAINER mode keeps a raster VERBATIM
+# and claims a different active window inside it -- the private-link
+# case, where both ends are ours, the receiver counts DE rather than
+# reading mode names, and EDID has no vote. The active window must end
+# before the sync it borrows.
+#
+# Sync polarity travels with the raster because it is part of it, and a
+# raster emitted with the other polarity is a mode a sink is entitled to
+# refuse.
+_PROVEN = (
+    "1280x720p60",
+    "1920x1080p30",
+    # 720x480p at 119.88 Hz. A sensor that reads out faster than 60
+    # frames a second needs a raster that scans out faster, and this is
+    # the slowest standard one that does: 54 MHz, a third of 720p60's
+    # data rate, so a link that carries 720p carries this with room.
+    # Measured on a Pi 2 at 119.9 Hz.
+    "720x480p120",
+)
 
+
+def _kms_raster(name: str) -> tuple:
+    r = raster(name)
+    flags = ((_FLAG_PHSYNC if r.hsync_positive else 0)
+             | (_FLAG_PVSYNC if r.vsync_positive else 0))
+    return (r.pixel_khz, r.hs_beg, r.hs_end, r.h_total,
+            r.vs_beg, r.vs_end, r.v_total, r.hz, flags)
+
+
+#   (clock kHz, hs_start, hs_end, htotal, vs_start, vs_end, vtotal, hz, flags)
+_RASTERS = tuple(_kms_raster(name) for name in _PROVEN)
 
 def container_fits(width: int, height: int, hz: int) -> bool:
     """Whether some proven raster holds this window at this refresh."""
     return any(rhz == hz and width < hss and height < vss
-               for _, hss, _, _, vss, _, _, rhz in _RASTERS)
+               for _, hss, _, _, vss, _, _, rhz, _ in _RASTERS)
 
 
 def container_mode(width: int, height: int, hz: int = 60) -> ModeInfo:
@@ -246,7 +269,7 @@ def container_mode(width: int, height: int, hz: int = 60) -> ModeInfo:
     end before the raster's sync starts, horizontally and vertically.
     Pure function, tested off-target, like pick_mode and for the same
     reason."""
-    for clock, hss, hse, htot, vss, vse, vtot, rhz in _RASTERS:
+    for clock, hss, hse, htot, vss, vse, vtot, rhz, flags in _RASTERS:
         if rhz != hz or width >= hss or height >= vss:
             continue
         mode = ModeInfo()
@@ -256,12 +279,12 @@ def container_mode(width: int, height: int, hz: int = 60) -> ModeInfo:
         mode.vdisplay, mode.vsync_start = height, vss
         mode.vsync_end, mode.vtotal = vse, vtot
         mode.vrefresh = rhz
-        mode.flags = _FLAG_PHSYNC | _FLAG_PVSYNC
+        mode.flags = flags
         mode.type = 0
         mode.name = f"{width}x{height}@{hz}c".encode()[:31]
         return mode
     limits = [f"{hss - 1}x{vss - 1}@{rhz}"
-              for _, hss, _, _, vss, _, _, rhz in _RASTERS]
+              for _, hss, _, _, vss, _, _, rhz, _ in _RASTERS]
     raise RuntimeError(
         f"no raster holds a {width}x{height}@{hz} container; the windows "
         f"must fit {limits}. A container borrows a proven raster's clock "

@@ -40,7 +40,7 @@ def main(argv=None) -> int:
     stream = sub.add_parser(
         "stream", help="scan out over HDMI (runs on the Pi)")
     stream.add_argument("--source", default="pattern",
-                        choices=["pattern", "camera", "file"])
+                        choices=["pattern", "camera", "file", "tof"])
     stream.add_argument("--file", default=None,
                         help="a recording to replay (.npy of containers, "
                              "as bayertap save writes) -- loops forever, "
@@ -55,7 +55,7 @@ def main(argv=None) -> int:
     stream.add_argument("--bayer", default="RGGB",
                         choices=sorted(protocol.BAYER_PHASE))
     stream.add_argument("--mode", default="1920x1080@30",
-                        help="required display mode WxH@Hz, or 'preferred'")
+                        help="required display mode WxH@Hz")
     stream.add_argument("--cam-mode", default=None,
                         help="sensor raw mode WxH for --source camera "
                              "(default 1296x972, the binned mode)")
@@ -185,6 +185,12 @@ def main(argv=None) -> int:
                 crop = tuple(int(v) for v in args.crop.split(","))
             frames = capture.frames(display, mode=cam_mode, crop=crop,
                                     source_id=args.source_id)
+        elif args.source == "tof":
+            from . import tof
+
+            # No mode and no crop: the sensor reads out one shape, and
+            # a window over it would cut across the phase interleave.
+            frames = tof.frames(display, source_id=args.source_id)
         elif args.source == "file":
             if not args.file:
                 parser.error("--source file needs --file <recording.npy>")
