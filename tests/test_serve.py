@@ -489,6 +489,39 @@ def test_the_firmware_is_brought_up_at_what_the_bridge_streams():
     assert got["aaa.exposure_max"] == "496"
 
 
+MODES = ("ok cropped_1080p=1920x1080x10,2,87500000,2416,1104 "
+         "binned_640x480=640x480x10,2,58333000,1852,504")
+
+
+def test_the_firmwares_modes_read_as_the_sensor_module_states_them():
+    from picam2hdmi.serve import parse_modes
+    modes = parse_modes(MODES)
+    assert [m["name"] for m in modes] == ["cropped_1080p", "binned_640x480"]
+    assert modes[1] == {"name": "binned_640x480", "width": 640,
+                        "height": 480, "bits": 10, "bayer_phase": 2,
+                        "pixel_rate_hz": 58333000, "line_length_pck": 1852,
+                        "frame_length_lines": 504}
+    assert parse_modes("ok") == [] and parse_modes("err no module") == []
+
+
+def test_the_firmware_is_told_the_streamed_mode_by_name():
+    """Where the sensor module has a mode of what the bridge streams, the
+    init names it and the frame comes with it; where it has none, the
+    frame is stated itself."""
+    from picam2hdmi.serve import firmware_init, parse_modes
+    status = {"width": "640", "height": "480", "bits": "10",
+              "order": "GBRG", "link_khz": "74250", "h_total": "2358",
+              "v_total": "506"}
+    named = dict(kv.split("=") for kv in firmware_init(
+        status, modes=parse_modes(MODES))[len("init "):].split())
+    assert named["mode"] == "binned_640x480"
+    assert not any(k.startswith("frame.") for k in named)
+    plain = dict(kv.split("=") for kv in firmware_init(
+        {**status, "bits": "12"},
+        modes=parse_modes(MODES))[len("init "):].split())
+    assert "mode" not in plain and plain["frame.bits"] == "12"
+
+
 def test_the_tv_raster_runs_on_the_links_line_and_frame_times():
     """A TV line lasts as long as a link line and a TV frame as long as a
     link frame, whatever the TV's clock; its active area is the largest
@@ -583,3 +616,54 @@ def test_a_480_line_picture_goes_out_at_480ps_clock():
     # 1920 only at twice the clock
     assert display_clock(rows, 1920, 1080, 74250, 1100) == 148500
     assert display_clock(["74250"], 640, 480) == 74250
+
+
+CLOCKS = [27000, 74250, 148500]
+
+
+def _link(mode, timing, link_khz=74250):
+    """What the bridge makes of the options: the sensor line it reads back
+    from --line-ns, the link line rounded up to an even count, and
+    --frame-lines as the link frame."""
+    import math
+    line = int(timing["line_ns"] * 1e-9 * mode["pixel_rate_hz"])
+    ht = math.ceil(line / mode["pixel_rate_hz"] * link_khz * 1000.0)
+    return line, ht + (ht & 1), timing["frame_lines"]
+
+
+def test_each_mode_is_timed_onto_a_raster_the_tv_knows():
+    """640x480 lands on 480p60 -- the one 480-line raster the TV takes --
+    and the 1080 crop on 1080p30, each by sensor line and frame lengths
+    the init then turns into exactly that raster."""
+    from bayerlink.rasters import RASTERS
+    from picam2hdmi.serve import (display_clock, display_raster,
+                                  parse_modes, sensor_timing)
+    for mode, want, line, frame in (
+            ("binned_640x480", "720x480p60", 1856, 524),
+            ("cropped_1080p", "1920x1080p30", 2591, 1125)):
+        m = next(x for x in parse_modes(MODES) if x["name"] == mode)
+        timing = sensor_timing(m, CLOCKS, 74250, 2)
+        assert timing["raster"] == want
+        got_line, ht, v = _link(m, timing)
+        assert (got_line, v) == (line, frame)
+        clock = display_clock(CLOCKS, m["width"], m["height"], 74250, ht)
+        tv = display_raster(m["width"], m["height"], 74250, ht, v, clock)
+        r = RASTERS[want]
+        assert (clock, tv["h_total"], tv["v_total"]) == (
+            r.pixel_khz, r.h_total, r.v_total)
+        # and the link frame lasts the raster's to within what the genlock
+        # follows: 2.1e-4 slipped until it jammed, and the TV blinked
+        from picam2hdmi.serve import GENLOCK_EASE
+        link_frame = ht * v / 74250e3
+        tv_frame = r.h_total * r.v_total / (r.pixel_khz * 1e3)
+        assert abs(link_frame - tv_frame) / tv_frame <= GENLOCK_EASE
+
+
+def test_a_mode_no_raster_can_take_runs_at_its_own_timing():
+    """A mode whose shortest frame is longer than every raster that holds
+    it gets no timing: nothing is forced."""
+    from picam2hdmi.serve import sensor_timing
+    slow = {"name": "x", "width": 640, "height": 480, "bits": 10,
+            "bayer_phase": 2, "pixel_rate_hz": 58333000,
+            "line_length_pck": 1852, "frame_length_lines": 4000}
+    assert sensor_timing(slow, CLOCKS, 74250, 2) is None

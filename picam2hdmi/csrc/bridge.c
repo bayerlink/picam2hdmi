@@ -490,7 +490,7 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
         snprintf(reply, cap,
                  "ok seq=%u locked=%d paused=%d source=%s "
                  "width=%u height=%u bits=%d order=%s link_khz=%u "
-                 "h_total=%u v_total=%u hz=%u exposure_max=%d "
+                 "h_total=%u v_total=%u hz=%u lock_spare=%d exposure_max=%d "
                  "phase=%.2f margin=%.0f "
                  "vblank=%d uptime=%ld exposure=%d gain=%d",
                  bstate.seq, bstate.locked, paused,
@@ -498,7 +498,7 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
                  FORMATS[fmt_row].bits, FORMATS[fmt_row].order,
                  RASTER ? RASTER->pixel_khz : 0, RASTER ? RASTER->h_total : 0,
                  RASTER ? RASTER->v_total : 0, RASTER ? RASTER->hz : 0,
-                 EXP_BOUND,
+                 LOCK_SPARE, EXP_BOUND,
                  bstate.phase,
                  bstate.margin,
                  bstate.vblank,

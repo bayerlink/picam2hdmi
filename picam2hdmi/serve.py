@@ -17,6 +17,7 @@ SCPI. This daemon owns the scanout and listens on:
     GET  /recordings/<name>   download it back, byte-identical
     DELETE /recordings/<name> remove it
     GET  /modules             the module slots' manifests
+    PUT  /modules             a bundle: <slot>.tar.gz packages, as one change
     PUT  /modules/<slot>      upload a package (tar.gz): isp, sensor,
                               ae, awb or af;
                               validated, compiled in, bridge restarted
@@ -680,20 +681,21 @@ TV_AREAS = ((1920, 1080), (1280, 1024), (1280, 720), (1024, 768),
 H_BLANK_MIN, V_BLANK_MIN = 64, 6
 
 
-def display_raster(width: int, height: int, link_khz: int, h_total: int,
-                   v_total: int, tv_khz: int = TV_KHZ) -> dict:
-    """The TV raster for a `width` x `height` picture on a link of
-    `h_total` x `v_total` at `link_khz`: its TIMING the link's -- a line
-    lasts as long as a link line, a frame as long as a link frame, so the
-    picture's lines go out exactly as fast as they come in and nothing is
-    stored -- and its active area the largest familiar one those totals
-    leave room for, at least the picture. No rate is asked for or stated:
-    the TV decides whether it takes it."""
-    # Where the link's timing is, within a hair, a raster the TV's table
-    # knows at this clock, the TV gets that raster whole, its syncs too:
-    # its frame lasts as long as the link's to within the genlock's ease
-    # (5e-4), and its line drifts from the link's by less than a line
-    # across the picture -- what the raster's lead already holds.
+# How far apart a link frame and the raster frame following it may be:
+# the genlock pulls the raster by one fine-phase step (about 26 ps at a
+# 27 MHz display clock) a handshake, some 50 ppm at most, and an error it
+# must follow continuously sits well inside that. Measured: 480p 2.1e-4
+# off its link blinked; 1.2e-6 held.
+GENLOCK_EASE = 2e-5
+
+
+def standard_raster(width: int, height: int, link_khz: int, h_total: int,
+                    v_total: int, tv_khz: int):
+    """The raster of the TV's table this link's timing IS, within a hair,
+    at this clock -- or None. Its frame lasts as long as the link's to
+    within the genlock's ease (GENLOCK_EASE), and its line drifts from the
+    link's by less than a line across the picture: what the raster's lead
+    already holds."""
     from bayerlink.rasters import RASTERS
     link_line, link_frame = h_total / link_khz, h_total * v_total / link_khz
     near = []
@@ -703,10 +705,79 @@ def display_raster(width: int, height: int, link_khz: int, h_total: int,
             continue
         frame_err = abs(r.h_total * r.v_total / tv_khz - link_frame) / link_frame
         drift = abs(r.h_total / tv_khz - link_line) * height
-        if frame_err <= 5e-4 and drift < link_line:
+        if frame_err <= GENLOCK_EASE and drift < link_line:
             near.append((frame_err, r))
-    if near:
-        r = min(near, key=lambda x: x[0])[1]
+    return min(near, key=lambda x: x[0])[1] if near else None
+
+
+def sensor_timing(mode: dict, clocks, link_khz: int,
+                  lock_spare: int) -> dict | None:
+    """The sensor line and frame lengths that put `mode` on a raster of the
+    TV's table, or None where none can be reached. For each raster the
+    picture fits, at a clock the board makes, every sensor line whose link
+    line -- as the bridge makes it: its clock, rounded up to an even count
+    -- drifts from the raster's by less than a line over the picture (and
+    no shorter than the mode's own line), with the frame lines that last
+    the raster's frame (no fewer than the mode's own and the bridge's lock
+    spare); the one whose frame lands closest, then drifts least. A
+    candidate counts only where the init will take that very raster --
+    display_clock picks its clock and standard_raster recognises the link
+    -- so what is planned here and what is applied are one rule. Of those:
+    the smallest that holds the picture, then the fastest the sensor
+    reaches."""
+    import math
+    from bayerlink.rasters import RASTERS
+    w, h, pr = mode["width"], mode["height"], mode["pixel_rate_hz"]
+    line_min, frame_min = mode["line_length_pck"], mode["frame_length_lines"]
+    best = None
+    for name, r in RASTERS.items():
+        if (r.pixel_khz not in clocks or w > r.h_active or h > r.v_active):
+            continue
+        tv_line = r.h_total / (r.pixel_khz * 1e3)
+        frame_s = tv_line * r.v_total
+        reach = math.ceil(tv_line / h * pr) + 2     # a line's drift, in pixels
+        near = round(tv_line * pr)
+        found = None
+        for line in range(max(line_min, near - reach), near + reach + 1):
+            ht = math.ceil(line / pr * link_khz * 1000.0)
+            ht += ht & 1
+            link_line = ht / (link_khz * 1e3)
+            drift = abs(link_line - tv_line) * h / link_line
+            frame = round(frame_s / link_line)
+            if drift >= 1 or frame < frame_min + lock_spare:
+                continue
+            err = abs(frame * link_line - frame_s) / frame_s
+            if found is None or (err, drift) < found[0]:
+                found = ((err, drift), line, ht, frame)
+        if found is None:
+            continue                    # the sensor cannot reach this one
+        _, line, ht, frame = found
+        ns = math.ceil(line * 1e9 / pr)
+        while int(ns * 1e-9 * pr) < line:   # as the bridge reads it back
+            ns += 1
+        if (display_clock(clocks, w, h, link_khz, ht) != r.pixel_khz
+                or standard_raster(w, h, link_khz, ht, frame,
+                                   r.pixel_khz) is not r):
+            continue
+        key = (r.h_active * r.v_active, -r.pixel_khz * 1e3 /
+               (r.h_total * r.v_total))
+        if best is None or key < best[0]:
+            best = (key, {"raster": name, "line_ns": ns,
+                          "frame_lines": frame})
+    return best[1] if best else None
+
+
+def display_raster(width: int, height: int, link_khz: int, h_total: int,
+                   v_total: int, tv_khz: int = TV_KHZ) -> dict:
+    """The TV raster for a `width` x `height` picture on a link of
+    `h_total` x `v_total` at `link_khz`: its TIMING the link's -- a line
+    lasts as long as a link line, a frame as long as a link frame, so the
+    picture's lines go out exactly as fast as they come in and nothing is
+    stored -- and its active area the largest familiar one those totals
+    leave room for, at least the picture. No rate is asked for or stated:
+    the TV decides whether it takes it."""
+    r = standard_raster(width, height, link_khz, h_total, v_total, tv_khz)
+    if r is not None:
         return {f: int(getattr(r, f)) for f in (
             "pixel_khz", "h_total", "v_total", "h_active", "v_active",
             "hs_beg", "hs_end", "vs_beg", "vs_end", "hsync_positive",
@@ -758,22 +829,48 @@ def display_clock(clocks, width: int, height: int, link_khz: int = 0,
     return clocks[-1]
 
 
+def parse_modes(reply: str) -> list[dict]:
+    """The firmware's `modes` reply -- the sensor module's own modes, each
+    `name=WxHxBITS,phase,pixel_rate,line,frame` -- as dicts; none where it
+    states none or does not answer."""
+    if not reply.startswith("ok"):
+        return []
+    modes = []
+    for token in reply[2:].split():
+        name, _, spec = token.partition("=")
+        size, *timing = spec.split(",")
+        w, h, bits = (int(x) for x in size.split("x"))
+        phase, rate, line, frame = (int(x) for x in timing)
+        modes.append({"name": name, "width": w, "height": h, "bits": bits,
+                      "bayer_phase": phase, "pixel_rate_hz": rate,
+                      "line_length_pck": line, "frame_length_lines": frame})
+    return modes
+
+
 def firmware_init(status: dict, aaa: dict | None = None,
-                  tv_khz: int = TV_KHZ) -> str:
+                  tv_khz: int = TV_KHZ, modes: list | None = None) -> str:
     """The firmware's `init` for what the bridge streams: the sensor's
-    frame (from `bridge status`), the TV raster on the link's timing --
-    the link's clock and totals ARE the sensor's line and frame -- the
-    picture centred, the 3A settings. No rate appears: the TV raster
-    takes the link's line and frame times, whatever they are."""
+    mode, by the name the sensor module gives it (from `modes`) -- the
+    frame comes with it -- or, where the module states no mode of this
+    size, the frame itself (from `bridge status`); the TV raster on the
+    link's timing -- the link's clock and totals ARE the sensor's line and
+    frame -- the picture centred, the 3A settings. No rate appears: the TV
+    raster takes the link's line and frame times, whatever they are."""
     from bayerlink.protocol import BAYER_PHASE
 
     khz, ht, vt = (int(status[k]) for k in ("link_khz", "h_total", "v_total"))
     tv = display_raster(int(status["width"]), int(status["height"]), khz,
                         ht, vt, tv_khz)
-    fields = {
+    mode = next((m["name"] for m in modes or ()
+                 if (m["width"], m["height"], m["bits"]) ==
+                 (int(status["width"]), int(status["height"]),
+                  int(status["bits"]))), None)
+    frame = ({"mode": mode} if mode else {
         "frame.width": status["width"], "frame.height": status["height"],
         "frame.bits": status["bits"],
-        "frame.bayer_phase": BAYER_PHASE[status["order"]],
+        "frame.bayer_phase": BAYER_PHASE[status["order"]]})
+    fields = {
+        **frame,
         **{f"display.{f}": int(tv[f]) for f in (
             "pixel_khz", "h_total", "v_total", "h_active", "v_active",
             "hs_beg", "hs_end", "vs_beg", "vs_end", "hsync_positive",
@@ -788,6 +885,28 @@ def firmware_init(status: dict, aaa: dict | None = None,
             **(aaa or {})}.items()},
     }
     return "init " + " ".join(f"{k}={v}" for k, v in fields.items())
+
+
+def _timing_args(want: str, bridge: dict) -> str:
+    """The bridge's line and frame options that put mode `want` (WxH) on a
+    raster of the TV's table, from the sensor module's statement of the
+    mode and the bridge's own link facts; nothing where either is missing
+    or no raster can be reached -- the mode then runs at its own timing."""
+    w, h = (int(x) for x in want.split("x"))
+    try:
+        modes = parse_modes(_bridge_command("modes"))
+        fw = dict(t.split("=", 1) for t in _bridge_command("status").split()
+                  if "=" in t)
+        clocks = [int(c) for c in fw.get("tv_khz", str(TV_KHZ)).split(",")]
+        link_khz, spare = int(bridge["link_khz"]), int(bridge["lock_spare"])
+    except (OSError, KeyError, ValueError):
+        return ""
+    mode = next((m for m in modes if (m["width"], m["height"]) == (w, h)),
+                None)
+    timing = mode and sensor_timing(mode, clocks, link_khz, spare)
+    if not timing:
+        return ""
+    return f" --line-ns {timing['line_ns']} --frame-lines {timing['frame_lines']}"
 
 
 def _bridge_status() -> dict:
@@ -813,7 +932,8 @@ def _firmware_up(aaa: dict | None = None) -> str:
                              display_clock(clocks, int(status["width"]),
                                            int(status["height"]),
                                            int(status["link_khz"]),
-                                           int(status["h_total"])))
+                                           int(status["h_total"])),
+                             modes=parse_modes(_bridge_command("modes")))
         return _bridge_command(line, timeout=15.0)
     except (OSError, KeyError, ValueError) as error:
         return f"err {error}"
@@ -1191,12 +1311,22 @@ def _handler(supervisor: Supervisor):
                     # mid-stream on it and enumeration would steal its
                     # frames. It stays IN the list -- it is what is on
                     # the television -- and says who is driving it.
-                    return self._send(200, {
-                        "cameras": [{"index": i, "model": model,
-                                     "driven_by": "bridge"}
-                                    for i, model in
-                                    enumerate(_sensors_from_sysfs())],
-                        "owner": "bridge"})
+                    # Its modes are the sensor module's, by the firmware:
+                    # the sensor's own statement, which a system with no
+                    # driver has too -- never what a driver happens to
+                    # enumerate.
+                    try:
+                        modes = parse_modes(_bridge_command("modes"))
+                    except OSError:
+                        modes = []
+                    cameras = [{"index": i, "model": model,
+                                "driven_by": "bridge"}
+                               for i, model in enumerate(_sensors_from_sysfs())]
+                    if cameras and modes:
+                        cameras[0]["modes"] = [[m["width"], m["height"],
+                                                m["name"]] for m in modes]
+                    return self._send(200, {"cameras": cameras,
+                                            "owner": "bridge"})
                 # Enumerated fresh on each ask: cameras appear when a ribbon
                 # is reseated, and a panel poll should see that without a
                 # daemon restart. On a bench with no camera stack this is
@@ -1472,10 +1602,11 @@ def _handler(supervisor: Supervisor):
                         mode = spec.get("cam_mode")
                         if mode and len(mode) >= 2:
                             want = f"{int(mode[0])}x{int(mode[1])}"
-                            now = ""
+                            now, args = "", f"--mode {want}"
                             try:
                                 fields = _bridge_status()
                                 now = f"{fields.get('width')}x{fields.get('height')}"
+                                args += _timing_args(want, fields)
                             except OSError:
                                 pass
                             if want != now:
@@ -1488,8 +1619,7 @@ def _handler(supervisor: Supervisor):
                                 # one bad choice is a dead end.
                                 before = (env.read_text()
                                           if env.exists() else None)
-                                env.write_text(
-                                    f"BRIDGE_ARGS=--mode {want}\n")
+                                env.write_text(f"BRIDGE_ARGS={args}\n")
                                 _bridge_service("restart")
                                 if not _bridge_up():
                                     if before is None:
@@ -1566,6 +1696,18 @@ def _handler(supervisor: Supervisor):
                     return self._send(400, {
                         "error": f"{type(error).__name__}: {error}"})
                 return self._send(200, supervisor.status())
+            if route == "/modules":
+                # a bundle: several slots' packages as one change
+                from . import modules_mgr
+                try:
+                    result = modules_mgr.install_bundle(
+                        self.rfile.read(length))
+                except ValueError as error:
+                    return self._send(400, {"error": str(error)})
+                except Exception as error:  # noqa: BLE001 -- the compile log
+                    return self._send(400, {
+                        "error": f"{type(error).__name__}: {error}"})
+                return self._send(200, result)
             if route.startswith("/modules/"):
                 from . import modules_mgr
                 slot = route[len("/modules/"):]

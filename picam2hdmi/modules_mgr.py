@@ -53,12 +53,14 @@ def _as_list(v) -> list:
     return v if isinstance(v, list) else ([v] if v else [])
 
 
-def _check_pair(slot: str, manifest: dict) -> str | None:
-    """Every requires must be satisfiable: a contract an OCCUPIED
-    other slot provides under a different version is a mismatch; an
-    empty slot is fine -- install order is the operator's."""
-    installed = {sl: manifest_of(sl) for sl in SLOTS if sl != slot}
-    installed[slot] = manifest
+def _check_set(new: dict) -> str | None:
+    """Every requires must be satisfiable across the slots as they will
+    be: those installed, with `new` ({slot: manifest}) in place of what
+    its slots hold. A contract an OCCUPIED slot provides under a different
+    version is a mismatch; an empty slot is fine -- install order is the
+    operator's."""
+    installed = {sl: manifest_of(sl) for sl in SLOTS}
+    installed.update(new)
     provides: dict[str, str] = {}
     for m in installed.values():
         for p in _as_list((m or {}).get("provides")):
@@ -73,9 +75,9 @@ def _check_pair(slot: str, manifest: dict) -> str | None:
     return None
 
 
-def install(slot: str, blob: bytes) -> dict:
-    """Unpack, validate, install, rebuild. Raises ValueError with the
-    reason on anything a caller can fix."""
+def _unpack(slot: str, blob: bytes) -> tuple[dict, dict]:
+    """A package's manifest and files, validated for its slot. Raises
+    ValueError with the reason on anything a caller can fix."""
     if slot not in SLOTS:
         raise ValueError(f"slot must be one of {SLOTS}")
     if len(blob) > MAX_PACKAGE:
@@ -88,38 +90,86 @@ def install(slot: str, blob: bytes) -> dict:
     for m in members:
         if not m.isfile() or "/" in m.name or m.name.startswith("."):
             raise ValueError(f"package must be flat files; {m.name!r} is not")
-    names = {m.name for m in members}
-    if "manifest.json" not in names:
+    files = {m.name: tar.extractfile(m).read() for m in members}
+    if "manifest.json" not in files:
         raise ValueError("no manifest.json in package")
-    manifest = json.loads(tar.extractfile("manifest.json").read())
+    manifest = json.loads(files["manifest.json"])
     if manifest.get("kind") != "picam2hdmi-module" or manifest.get("abi") != 1:
         raise ValueError("manifest kind/abi is not picam2hdmi-module/1")
     if manifest.get("slot") != slot:
         raise ValueError(f"package is for slot {manifest.get('slot')!r}, "
                          f"not {slot!r}")
     for src in manifest.get("sources", []):
-        if src not in names:
+        if src not in files:
             raise ValueError(f"manifest names {src!r} but it is not in "
                              "the package")
-    clash = _check_pair(slot, manifest)
+    return manifest, files
+
+
+def install(slot: str, blob: bytes) -> dict:
+    """Unpack, validate, install, rebuild. Raises ValueError with the
+    reason on anything a caller can fix."""
+    result = install_many({slot: blob})
+    return {**result["installed"][0], "bridge_restarted":
+            result["bridge_restarted"]}
+
+
+def install_bundle(blob: bytes) -> dict:
+    """A bundle: one tar.gz of `<slot>.tar.gz` packages, installed as one
+    change (install_many). What an ABI bump needs -- a provider and its
+    consumers move together, and one at a time each is refused against
+    the other's old version."""
+    try:
+        tar = tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz")
+    except tarfile.TarError as e:
+        raise ValueError(f"not a tar.gz: {e}") from None
+    packages = {}
+    for m in tar.getmembers():
+        if (not m.isfile() or not m.name.endswith(".tar.gz") or "/" in m.name
+                or m.name.startswith(".")):
+            raise ValueError(f"a bundle holds <slot>.tar.gz files; {m.name!r} "
+                             "is not one")
+        packages[m.name[:-len(".tar.gz")]] = tar.extractfile(m).read()
+    if not packages:
+        raise ValueError("an empty bundle")
+    return install_many(packages)
+
+
+def install_many(packages: dict) -> dict:
+    """Install {slot: package} as ONE change: every package validated, the
+    contracts checked across the slots as they will be, all written, one
+    rebuild and one bridge restart. If the result does not compile, every
+    slot goes back to what it held."""
+    unpacked = {slot: _unpack(slot, blob) for slot, blob in packages.items()}
+    clash = _check_set({slot: m for slot, (m, _) in unpacked.items()})
     if clash:
         raise ValueError(clash)
-
-    d = slot_dir(slot)
-    if d.exists():
-        shutil.rmtree(d)
-    d.mkdir(parents=True)
-    for m in members:
-        (d / m.name).write_bytes(tar.extractfile(m).read())
+    saved = {}
+    for slot, (_, files) in unpacked.items():
+        d = slot_dir(slot)
+        saved[slot] = ({p.name: p.read_bytes() for p in d.iterdir()
+                        if p.is_file()} if d.exists() else None)
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True)
+        for name, data in files.items():
+            (d / name).write_bytes(data)
     try:
         ensure_built(rebuild=False)   # source changed => new cache key
     except Exception:
-        # a package that does not compile does not stay installed
-        shutil.rmtree(d, ignore_errors=True)
+        # what does not compile does not stay installed
+        for slot, old in saved.items():
+            d = slot_dir(slot)
+            shutil.rmtree(d, ignore_errors=True)
+            if old is not None:
+                d.mkdir(parents=True)
+                for name, data in old.items():
+                    (d / name).write_bytes(data)
         raise
     restarted = _restart_bridge()
-    return {"installed": manifest.get("name"), "slot": slot,
-            "version": manifest.get("version"),
+    return {"installed": [{"installed": m.get("name"), "slot": slot,
+                           "version": m.get("version")}
+                          for slot, (m, _) in unpacked.items()],
             "bridge_restarted": restarted}
 
 
@@ -136,12 +186,15 @@ def remove(slot: str) -> dict:
 
 
 def _restart_bridge() -> bool:
-    """Best-effort: if the bridge runs as the systemd fixture, bounce
-    it so the new build takes over. Anything else is the operator's
-    arrangement and stays untouched."""
+    """Best-effort: if the bridge runs as the systemd fixture -- or did,
+    until a module crashed it -- bounce it so the new build takes over:
+    installing modules is how a crashing one is replaced. A bridge stopped
+    on purpose, or one this daemon did not start, stays as it is."""
     r = subprocess.run(["systemctl", "is-active", "--quiet", "bridge"],
                        check=False)
-    if r.returncode != 0:
+    failed = subprocess.run(["systemctl", "is-failed", "--quiet", "bridge"],
+                            check=False)
+    if r.returncode != 0 and failed.returncode != 0:
         return False
     # A restart asked for is not a crash: clear the unit's start count
     # first, or a handful of uploads in two minutes trips the limit that

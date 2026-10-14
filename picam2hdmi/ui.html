@@ -381,15 +381,18 @@ function haveMode(value) {
 }
 
 function modeOptions(list, keep) {
-  // The sensor's own modes, when the daemon can see them. `keep` (the
-  // mode on the wire) survives regardless.
+  // The sensor's own modes: [width, height] and, from the sensor module,
+  // its name, which labels it. `keep` (the mode on the wire) survives
+  // regardless.
   const sel = $('cmode');
-  const wanted = list.map(m => m.join('x'));
+  const wanted = list.map(m => `${m[0]}x${m[1]}`);
+  const label = Object.fromEntries(list.map(
+    m => [`${m[0]}x${m[1]}`, m[2] ? `${m[2]} (${m[0]}x${m[1]})` : `${m[0]}x${m[1]}`]));
   if (keep && !wanted.includes(keep)) wanted.push(keep);
   if (wanted.join() === [...sel.options].map(o => o.value).join()) return;
   const was = sel.value;
   sel.innerHTML = '';
-  for (const value of wanted) sel.add(new Option(value, value));
+  for (const value of wanted) sel.add(new Option(label[value] || value, value));
   if (wanted.includes(was)) sel.value = was;
 }
 
