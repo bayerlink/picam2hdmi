@@ -31,9 +31,9 @@ struct bridge_frame {
 
 void bridge_frame_hook(const struct bridge_frame *f);
 
-/* A display raster: totals, active area, sync windows and polarities,
- * pixel clock -- one row of bayerlink.rasters, which the on-device
- * build generates into rasters.h, so C keeps no copy of its own.
+/* A raster: totals, active area, sync windows and polarities, pixel
+ * clock. The link's is the sensor's own timing carried over -- one
+ * sensor line a link line, one frame a frame -- at the link's clock.
  * Positions count from the first active pixel (line). */
 struct bridge_raster {
     const char *name;       /* "1920x1080p30" */

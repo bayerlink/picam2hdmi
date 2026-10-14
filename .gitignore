@@ -7,4 +7,3 @@ dist/
 .pytest_cache/
 *.npy
 *.bin
-picam2hdmi/csrc/gen/

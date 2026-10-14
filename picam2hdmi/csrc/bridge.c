@@ -51,7 +51,6 @@
 
 #include <linux/media-bus-format.h>
 #include "bridge.h"
-#include "rasters.h"
 #include <linux/v4l2-subdev.h>
 #include <linux/videodev2.h>
 
@@ -64,8 +63,8 @@
  * inside it -- the header states the true width and height, and a
  * receiver that takes its geometry from the stream crops correctly. */
 static const struct bridge_raster *RASTER;  /* the link's, chosen at start */
-static uint32_t WIDTH  = 1920;        /* the sensor's, until asked   */
-static uint32_t HEIGHT = 1080;
+static uint32_t WIDTH, HEIGHT;         /* the sensor's frame, as it says */
+static int EXP_BOUND;                  /* the longest integration the lock allows */
 static uint32_t VDISP;                 /* the raster's active + the header row */
 #define BL_MAGIC  0x4B4C5942u          /* "BYLK"                      */
 
@@ -188,19 +187,38 @@ static int order_given;                     /* --order beats discovery */
 static drmModeModeInfo MODE;
 static struct bridge_mode BMODE;
 
-/* The raster a WxH frame at HZ rides: one whose active width holds the
- * frame and whose lines hold it and its header row before the vertical
- * sync, at that rate, the slowest such -- the least the link has to
- * carry. NULL: none does. */
-static const struct bridge_raster *pick_raster(uint32_t w, uint32_t h,
-                                               uint32_t hz) {
-    const struct bridge_raster *best = NULL;
-    for (size_t i = 0; i < BRIDGE_N_RASTERS; i++) {
-        const struct bridge_raster *r = &BRIDGE_RASTERS[i];
-        if (r->hz != hz || w > r->h_active || h + 1 >= r->vs_beg) continue;
-        if (!best || r->pixel_khz < best->pixel_khz) best = r;
-    }
-    return best;
+/* The LINK raster is the sensor's, carried over: one sensor line a
+ * link line, one sensor frame a link frame, at the link's pixel clock --
+ * the one fact the far end fixes (its receiver is built for it). Nothing
+ * chooses a frame rate: the sensor's line time and frame length are its
+ * mode's, and the raster follows them. The line is rounded UP, and to an
+ * even count, so the link line is never shorter than the sensor's; the
+ * vertical-blanking trim of the line lock takes up the rest. The frame
+ * carries LOCK_SPARE lines past the sensor's own, so the lock can trim
+ * the sensor's blanking either way: with the raster at the sensor's
+ * minimum it could only slow it, and acquired by waiting out the drift.
+ * The syncs sit in the blanking, which the sensor's minimum holds. */
+#define LOCK_SPARE 2
+static struct bridge_raster LINK = {.name = "sensor"};
+static int derive_raster(uint32_t w, uint32_t h, double pixel_rate,
+                         int hblank, int vblank, uint32_t link_khz) {
+    double line_s = (w + hblank) / pixel_rate;
+    uint32_t ht = (uint32_t)ceil(line_s * link_khz * 1000.0);
+    ht += ht & 1u;
+    if (ht < w + 48 || vblank < 8) return -1;
+    LINK.pixel_khz = link_khz;
+    LINK.h_active = w;
+    LINK.hs_beg = w + 8;
+    LINK.hs_end = w + 40;
+    LINK.h_total = ht;
+    LINK.v_active = h;
+    LINK.vs_beg = h + 2;
+    LINK.vs_end = h + 6;
+    LINK.v_total = h + (uint32_t)vblank + LOCK_SPARE;
+    LINK.hsync_positive = LINK.vsync_positive = 1;
+    LINK.hz = (uint32_t)(link_khz * 1000.0 / ((double)ht * LINK.v_total)
+                         + 0.5);
+    return 0;
 }
 
 static void set_raster(const struct bridge_raster *r) {
@@ -412,6 +430,15 @@ static int read_ctrl(int fd, uint32_t id, int32_t *out) {
     return 0;
 }
 
+/* A control's DEFAULT, as the driver states it for the current mode --
+ * not the value in force, which is whatever the last caller left. */
+static int ctrl_default(int fd, uint32_t id, int32_t *out) {
+    struct v4l2_queryctrl q = {.id = id};
+    if (ioctl(fd, VIDIOC_QUERYCTRL, &q) < 0) return -1;
+    *out = q.default_value;
+    return 0;
+}
+
 /* What the loop knows, published for the control socket. Written once
  * per frame by the loop and read between frames by the same thread, so
  * it needs no lock. */
@@ -462,13 +489,17 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
         }
         snprintf(reply, cap,
                  "ok seq=%u locked=%d paused=%d source=%s "
-                 "width=%u height=%u bits=%d order=%s raster=%s "
+                 "width=%u height=%u bits=%d order=%s link_khz=%u "
+                 "h_total=%u v_total=%u hz=%u exposure_max=%d "
                  "phase=%.2f margin=%.0f "
                  "vblank=%d uptime=%ld exposure=%d gain=%d",
                  bstate.seq, bstate.locked, paused,
                  clip_map ? "clip" : "sensor", WIDTH, HEIGHT,
                  FORMATS[fmt_row].bits, FORMATS[fmt_row].order,
-                 RASTER ? RASTER->name : "-", bstate.phase,
+                 RASTER ? RASTER->pixel_khz : 0, RASTER ? RASTER->h_total : 0,
+                 RASTER ? RASTER->v_total : 0, RASTER ? RASTER->hz : 0,
+                 EXP_BOUND,
+                 bstate.phase,
                  bstate.margin,
                  bstate.vblank,
                  bstate.started ? (long)(time(NULL) - bstate.started) : 0L,
@@ -921,7 +952,8 @@ int main(int argc, char **argv) {
      * start-up already does correctly. The frame need only fit the
      * raster -- it sits inside it, and the header tells the receiver
      * the truth. */
-    unsigned want_w = 0, want_h = 0, want_hz = 30;
+    unsigned want_w = 0, want_h = 0, link_khz = 74250, frame_lines = 0;
+    unsigned line_ns = 0;
     const char *want_order = NULL;
     int test_pattern = 0, selftest = 0;
     const char *video = NULL, *subdev = "/dev/v4l-subdev0";
@@ -936,41 +968,36 @@ int main(int argc, char **argv) {
             want_order = argv[++i];
         }
         else if (!strcmp(argv[i], "--mode")) {
-            int n = sscanf(argv[++i], "%ux%u@%u", &want_w, &want_h, &want_hz);
-            if (n != 2 && n != 3) {
-                fprintf(stderr, "bridge: --mode wants WxH[@HZ], e.g. "
-                        "1296x972 or 1920x1080@60\n");
+            char tail;
+            if (sscanf(argv[++i], "%ux%u%c", &want_w, &want_h, &tail) != 2) {
+                fprintf(stderr, "bridge: --mode wants the sensor's WxH, "
+                        "e.g. 1296x972 -- its rate is the sensor's own\n");
                 return 1;
             }
         }
+        else if (!strcmp(argv[i], "--link-khz")) link_khz = atoi(argv[++i]);
+        /* The sensor's frame length, in its own lines: a setting OF THE
+         * SENSOR -- its vertical blanking -- which the link then follows
+         * like any other part of its timing. 0: the mode's own. */
+        else if (!strcmp(argv[i], "--frame-lines"))
+            frame_lines = atoi(argv[++i]);
+        /* The sensor's line time, in ns: its horizontal blanking, another
+         * setting of the sensor the link follows. 0: the mode's own. */
+        else if (!strcmp(argv[i], "--line-ns")) line_ns = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--video")) video = argv[++i];
         else if (!strcmp(argv[i], "--subdev")) subdev = argv[++i];
         else { fprintf(stderr, "unknown arg %s\n", argv[i]); return 2; }
     }
     crc_init();
     setvbuf(stdout, NULL, _IOLBF, 0);   /* notes must land, not pool */
-    {
-        uint32_t w = want_w ? want_w : WIDTH, h = want_h ? want_h : HEIGHT;
-        const struct bridge_raster *r = pick_raster(w, h, want_hz);
-        if (!r) {
-            fprintf(stderr, "bridge: no raster carries %ux%u at %u Hz; "
-                    "the rasters are:", w, h, want_hz);
-            for (size_t i = 0; i < BRIDGE_N_RASTERS; i++)
-                fprintf(stderr, " %s", BRIDGE_RASTERS[i].name);
-            fprintf(stderr, "\n");
-            return 1;
-        }
-        set_raster(r);
-        if (!selftest)
-            printf("bridge: raster %s for a %ux%u frame\n", r->name, w, h);
-    }
-
     if (selftest) {
         /* `make check` compares these bytes with the Python reference:
          * the header layout has ONE owner and this copy is verified
          * against it, never trusted. */
         uint8_t h[48];
         uint32_t seqs[3] = {7, 0, 123456};
+        /* the reference vectors' frame, not a default of this file's */
+        WIDTH = 1920; HEIGHT = 1080;
         for (int i = 0; i < 3; i++) {
             pack_header(h, seqs[i], SOURCE_ID_OV5647);
             for (int b = 0; b < 48; b++) printf("%02x", h[b]);
@@ -1022,6 +1049,107 @@ int main(int argc, char **argv) {
         fprintf(stderr, "note: no SCHED_FIFO (%s)\n", strerror(errno));
     if (mlockall(MCL_CURRENT | MCL_FUTURE))
         fprintf(stderr, "note: no mlockall (%s)\n", strerror(errno));
+
+    /* --- camera --------------------------------------------------- */
+    int sfd = open(subdev, O_RDWR);
+    if (sfd < 0) die("open subdev");
+    /* The mode asked for, or -- none asked -- the one the sensor is in:
+     * this file has no size of its own to offer it. */
+    struct v4l2_subdev_format sf = {
+        .which = V4L2_SUBDEV_FORMAT_ACTIVE, .pad = 0,
+        .format = {.width = want_w, .height = want_h,
+                   .code = FORMATS[fmt_row].mbus,
+                   .field = V4L2_FIELD_NONE}};
+    if (want_w) {
+        if (ioctl(sfd, VIDIOC_SUBDEV_S_FMT, &sf) < 0) die("SUBDEV_S_FMT");
+    } else if (ioctl(sfd, VIDIOC_SUBDEV_G_FMT, &sf) < 0) {
+        die("SUBDEV_G_FMT");
+    }
+    WIDTH = sf.format.width;
+    HEIGHT = sf.format.height;
+
+    /* ...and now ASK, rather than assume it took what was offered.
+     * The answer settles the geometry, the mosaic order and the depth
+     * in one go -- three constants this file used to declare, and each
+     * of which has cost a bench day at least once when the declaration
+     * and the sensor disagreed. An explicit --order still wins, since
+     * an operator correcting a driver is the case that flag exists
+     * for. */
+    {
+        uint32_t dw = WIDTH, dh = HEIGHT;
+        int drow = fmt_row;
+        if (discover_sensor(sfd, &dw, &dh, &drow)) {
+            WIDTH = dw;
+            HEIGHT = dh;
+            /* The row settles all three names at once: what unicam is
+             * asked to deliver, and what the header tells the receiver
+             * to unpack. An explicit --order still wins, but only the
+             * ORDER -- the depth is the sensor's to state. */
+            if (order_given && want_order) {
+                int r = format_row(want_order, FORMATS[drow].bits);
+                if (r < 0) {
+                    fprintf(stderr, "bridge: no %s format at %d bits\n",
+                            want_order, FORMATS[drow].bits);
+                    return 1;
+                }
+                fmt_row = r;
+            } else {
+                fmt_row = drow;
+            }
+            printf("bridge: sensor says %ux%u %s %d-bit%s\n", WIDTH, HEIGHT,
+                   FORMATS[fmt_row].order, FORMATS[fmt_row].bits,
+                   order_given ? " (order overridden on the command line)"
+                               : "");
+        }
+    }
+
+    /* The link raster, from the sensor's own timing in this mode: its
+     * pixel rate and the blanking its driver states as the mode's -- its
+     * defaults, never the values in force, which are whatever the last
+     * run left (reading those, each restart lengthened the line by the
+     * rounding of the one before). */
+    {
+        int32_t hb = 0, vb = 0;
+        double pr = (double)get_pixel_rate(sfd);
+        if (ctrl_default(sfd, V4L2_CID_HBLANK, &hb) < 0 ||
+            ctrl_default(sfd, V4L2_CID_VBLANK, &vb) < 0 || pr <= 0) {
+            fprintf(stderr, "bridge: the sensor does not state its pixel "
+                    "rate and blanking, so its line cannot be carried\n");
+            return 1;
+        }
+        if (line_ns) {
+            /* the longest sensor line that does not exceed the time asked:
+             * the link's line, rounded up from it, then lands on it */
+            int asked = (int)(line_ns * 1e-9 * pr) - (int)WIDTH;
+            if (asked < hb) {
+                fprintf(stderr, "bridge: %u ns is shorter than the sensor's "
+                        "shortest %ux%u line\n", line_ns, WIDTH, HEIGHT);
+                return 1;
+            }
+            hb = asked;
+        }
+        if (frame_lines) {
+            int asked = (int)frame_lines - (int)HEIGHT - LOCK_SPARE;
+            if (asked < vb) {
+                fprintf(stderr, "bridge: %u lines is shorter than the "
+                        "sensor's shortest %ux%u frame (%u lines)\n",
+                        frame_lines, WIDTH, HEIGHT,
+                        HEIGHT + (unsigned)vb + LOCK_SPARE);
+                return 1;
+            }
+            vb = asked;
+        }
+        if (derive_raster(WIDTH, HEIGHT, pr, hb, vb, link_khz) < 0) {
+            fprintf(stderr, "bridge: a %ux%u frame with %d+%d blanking "
+                    "does not fit a link at %u kHz\n", WIDTH, HEIGHT, hb,
+                    vb, link_khz);
+            return 1;
+        }
+        set_raster(&LINK);
+        printf("bridge: link raster %ux%u of %ux%u at %u kHz, %u Hz -- "
+               "the sensor's\n", LINK.h_active, LINK.v_active, LINK.h_total,
+               LINK.v_total, link_khz, LINK.hz);
+    }
 
     /* --- display ------------------------------------------------- */
     int dfd = open("/dev/dri/card1", O_RDWR);
@@ -1112,59 +1240,6 @@ int main(int argc, char **argv) {
     if (drmPrimeHandleToFD(dfd, pay.handle, DRM_CLOEXEC | DRM_RDWR, &dmabuf))
         die("PrimeHandleToFD");
 
-    /* --- camera --------------------------------------------------- */
-    int sfd = open(subdev, O_RDWR);
-    if (sfd < 0) die("open subdev");
-    struct v4l2_subdev_format sf = {
-        .which = V4L2_SUBDEV_FORMAT_ACTIVE, .pad = 0,
-        .format = {.width = want_w ? want_w : WIDTH,
-                   .height = want_h ? want_h : HEIGHT,
-                   .code = FORMATS[fmt_row].mbus,
-                   .field = V4L2_FIELD_NONE}};
-    if (ioctl(sfd, VIDIOC_SUBDEV_S_FMT, &sf) < 0) die("SUBDEV_S_FMT");
-
-    /* ...and now ASK, rather than assume it took what was offered.
-     * The answer settles the geometry, the mosaic order and the depth
-     * in one go -- three constants this file used to declare, and each
-     * of which has cost a bench day at least once when the declaration
-     * and the sensor disagreed. An explicit --order still wins, since
-     * an operator correcting a driver is the case that flag exists
-     * for. */
-    {
-        uint32_t dw = WIDTH, dh = HEIGHT;
-        int drow = fmt_row;
-        if (discover_sensor(sfd, &dw, &dh, &drow)) {
-            if (dw > RASTER->h_active || dh + 1 >= RASTER->vs_beg) {
-                fprintf(stderr, "bridge: the sensor is sending %ux%u, which "
-                        "does not fit the %s raster chosen for the mode "
-                        "asked. Choose a smaller sensor mode.\n",
-                        dw, dh, RASTER->name);
-                return 1;
-            }
-            WIDTH = dw;
-            HEIGHT = dh;
-            /* The row settles all three names at once: what unicam is
-             * asked to deliver, and what the header tells the receiver
-             * to unpack. An explicit --order still wins, but only the
-             * ORDER -- the depth is the sensor's to state. */
-            if (order_given && want_order) {
-                int r = format_row(want_order, FORMATS[drow].bits);
-                if (r < 0) {
-                    fprintf(stderr, "bridge: no %s format at %d bits\n",
-                            want_order, FORMATS[drow].bits);
-                    return 1;
-                }
-                fmt_row = r;
-            } else {
-                fmt_row = drow;
-            }
-            printf("bridge: sensor says %ux%u %s %d-bit%s\n", WIDTH, HEIGHT,
-                   FORMATS[fmt_row].order, FORMATS[fmt_row].bits,
-                   order_given ? " (order overridden on the command line)"
-                               : "");
-        }
-    }
-
     set_ctrl(sfd, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL, "ae");
     set_ctrl(sfd, V4L2_CID_AUTOGAIN, 0, "agc");
     set_ctrl(sfd, V4L2_CID_AUTO_WHITE_BALANCE, 0, "awb");
@@ -1192,6 +1267,7 @@ int main(int argc, char **argv) {
      * blanking that defines it -- so it is PUBLISHED and complained
      * about, never overwritten. Whoever owns the value respects it. */
     int exp_bound = HEIGHT + vblank_fix - 8;
+    EXP_BOUND = exp_bound;
     printf("bridge: integration must fit %d lines (VTS bound); the value "
            "is the sensor package's\n", exp_bound);
     {

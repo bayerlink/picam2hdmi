@@ -470,27 +470,53 @@ def test_a_query_string_does_not_hide_a_route(instrument):
 
 
 def test_the_firmware_is_brought_up_at_what_the_bridge_streams():
-    """The init line carries the bridge's frame, the raster it rides by
-    bayerlink's numbers -- the sensor line-locked to it -- the picture
-    centred, and the 3A settings over the defaults."""
-    from bayerlink.rasters import raster
-
+    """The init line carries the sensor's frame, a TV raster on the link's
+    timing, the picture centred, the 3A settings -- and no rate."""
     from picam2hdmi.serve import firmware_init
-    line = firmware_init({"width": 1296, "height": 972, "bits": 10,
-                          "order": "GBRG", "raster": "1920x1080p60"},
-                         {"af": 1})
-    assert line.startswith("init ")
-    got = dict(kv.split("=") for kv in line[5:].split())
-    r = raster("1080p60")
-    assert got["frame.width"] == "1296" and got["frame.height"] == "972"
+    line = firmware_init({"width": "640", "height": "480", "bits": "10",
+                          "order": "GBRG", "link_khz": "74250",
+                          "h_total": "2358", "v_total": "506",
+                          "exposure_max": "496"}, {"af": 1})
+    got = dict(kv.split("=") for kv in line[len("init "):].split())
+    assert got["frame.width"] == "640" and got["frame.height"] == "480"
     assert got["frame.bayer_phase"] == "2"
-    assert got["frame.line_ns"] == str(round(2200 * 1e6 / 148500))
-    assert got["frame.frame_lines"] == str(r.v_total)
-    assert got["display.pixel_khz"] == "148500"
-    assert got["display.vs_beg"] == str(r.vs_beg)
+    assert not any(k.startswith("frame.") and k not in (
+        "frame.width", "frame.height", "frame.bits", "frame.bayer_phase")
+        for k in got), "the frame carries no timing"
+    assert (got["display.h_total"], got["display.v_total"]) == ("2358", "506")
     assert got["window.center"] == "1"
     assert (got["aaa.ae"], got["aaa.awb"], got["aaa.af"]) == ("1", "1", "1")
+    assert got["aaa.exposure_max"] == "496"
 
+
+def test_the_tv_raster_runs_on_the_links_line_and_frame_times():
+    """A TV line lasts as long as a link line and a TV frame as long as a
+    link frame, whatever the TV's clock; its active area is the largest
+    familiar one that fits, independent of the input's size."""
+    from picam2hdmi.serve import display_raster
+    # the 640x480 mode at its own 62 fps: a 506-line frame holds 480 lines
+    vga = display_raster(640, 480, 74250, 2358, 506)
+    assert (vga["h_total"], vga["v_total"]) == (2358, 506)
+    assert (vga["h_active"], vga["v_active"]) == (720, 480)
+    # a crop smaller than the frame changes the picture, not the raster
+    assert display_raster(320, 240, 74250, 2358, 506)["h_active"] == 720
+    # a TV clock twice the link's: the same times, twice the pixels in a
+    # line -- the area is still bounded by the frame's 506 lines
+    fast = display_raster(640, 480, 74250, 2358, 506, tv_khz=148500)
+    assert fast["h_total"] == 4716 and fast["v_total"] == 506
+    assert fast["v_active"] <= 506 - 6
+    for r in (vga, fast):
+        assert r["h_active"] < r["hs_beg"] < r["hs_end"] < r["h_total"]
+        assert r["v_active"] < r["vs_beg"] < r["vs_end"] < r["v_total"]
+    # the 640x480 mode on 480p's frame at the 480p clock: within a hair of
+    # 480p itself, the TV gets 480p whole -- its totals, syncs, polarities
+    p = display_raster(640, 480, 74250, 2364, 524, tv_khz=27000)
+    assert (p["h_total"], p["v_total"], p["h_active"], p["hsync_positive"]) \
+        == (858, 525, 720, 0)
+    # 1080p at the sensor's 32.7 fps: the frame holds the whole area
+    hd = display_raster(1920, 1080, 74250, 2052, 1106)
+    assert (hd["h_active"], hd["v_active"], hd["h_total"], hd["v_total"]) \
+        == (1920, 1080, 2052, 1106)
 
 def test_the_keeper_brings_the_firmware_up_once_per_bridge_run(
         tmp_path, monkeypatch):
@@ -541,3 +567,19 @@ def test_the_panel_and_the_keeper_do_not_both_bring_the_firmware_up(
     assert sup.firmware_now() == "ok"
     assert not sup.firmware_once()
     assert len(calls) == 1
+
+
+def test_a_480_line_picture_goes_out_at_480ps_clock():
+    """480 lines go out at 27 MHz where the board makes it -- the only form
+    a TV takes them in -- anything taller at the slowest clock fast enough
+    for its area at the link's line time."""
+    from picam2hdmi.serve import display_clock
+    rows = ["27000", "74250", "148500"]
+    assert display_clock(rows, 640, 480) == 27000
+    # 1080p at the sensor's 32.7 fps: a 2052-pixel link line holds 1920
+    # active and blanking at 74.25 MHz
+    assert display_clock(rows, 1920, 1080, 74250, 2052) == 74250
+    # a 1080p sensor at 60 fps: a 1100-pixel link line at 74.25 MHz holds
+    # 1920 only at twice the clock
+    assert display_clock(rows, 1920, 1080, 74250, 1100) == 148500
+    assert display_clock(["74250"], 640, 480) == 74250

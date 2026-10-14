@@ -17,7 +17,6 @@ SCPI. This daemon owns the scanout and listens on:
     GET  /recordings/<name>   download it back, byte-identical
     DELETE /recordings/<name> remove it
     GET  /modules             the module slots' manifests
-    GET  /rasters             bayerlink's rasters: timings, clock, rate
     PUT  /modules/<slot>      upload a package (tar.gz): isp, sensor,
                               ae, awb or af;
                               validated, compiled in, bridge restarted
@@ -669,30 +668,124 @@ def _bridge_command(line: str, timeout: float = 2.0) -> str:
 AAA_DEFAULT = {"ae": 1, "awb": 1, "af": 0}
 
 
-def firmware_init(status: dict, aaa: dict | None = None) -> str:
-    """The firmware's `init` for what the bridge streams: its frame (from
-    `bridge status`), the display raster it rides (bayerlink's, by the
-    name the bridge reports), the picture centred, and the 3A settings.
-    The firmware keeps no table of modes; this is where the knowledge
-    lives. The bridge line-locks the sensor to the raster, so the
-    sensor's line is the raster's and its frame the raster's total."""
-    from bayerlink.protocol import BAYER_PHASE
-    from bayerlink.rasters import raster
+# The board's TV clock where its firmware does not say: the firmware's
+# status lists the ones its build makes.
+TV_KHZ = 74250
+# Active areas a TV knows, largest first. Which one is POLICY, not a fact
+# of the input: the input's resolution and any crop decide the picture,
+# and the picture sits centred in whichever area is chosen.
+TV_AREAS = ((1920, 1080), (1280, 1024), (1280, 720), (1024, 768),
+            (800, 600), (720, 576), (720, 480), (640, 480))
+# the least blanking an area leaves: room for porches and a sync
+H_BLANK_MIN, V_BLANK_MIN = 64, 6
 
-    r = raster(status["raster"])
+
+def display_raster(width: int, height: int, link_khz: int, h_total: int,
+                   v_total: int, tv_khz: int = TV_KHZ) -> dict:
+    """The TV raster for a `width` x `height` picture on a link of
+    `h_total` x `v_total` at `link_khz`: its TIMING the link's -- a line
+    lasts as long as a link line, a frame as long as a link frame, so the
+    picture's lines go out exactly as fast as they come in and nothing is
+    stored -- and its active area the largest familiar one those totals
+    leave room for, at least the picture. No rate is asked for or stated:
+    the TV decides whether it takes it."""
+    # Where the link's timing is, within a hair, a raster the TV's table
+    # knows at this clock, the TV gets that raster whole, its syncs too:
+    # its frame lasts as long as the link's to within the genlock's ease
+    # (5e-4), and its line drifts from the link's by less than a line
+    # across the picture -- what the raster's lead already holds.
+    from bayerlink.rasters import RASTERS
+    link_line, link_frame = h_total / link_khz, h_total * v_total / link_khz
+    near = []
+    for r in RASTERS.values():
+        if (r.pixel_khz != tv_khz or width > r.h_active
+                or height > r.v_active):
+            continue
+        frame_err = abs(r.h_total * r.v_total / tv_khz - link_frame) / link_frame
+        drift = abs(r.h_total / tv_khz - link_line) * height
+        if frame_err <= 5e-4 and drift < link_line:
+            near.append((frame_err, r))
+    if near:
+        r = min(near, key=lambda x: x[0])[1]
+        return {f: int(getattr(r, f)) for f in (
+            "pixel_khz", "h_total", "v_total", "h_active", "v_active",
+            "hs_beg", "hs_end", "vs_beg", "vs_end", "hsync_positive",
+            "vsync_positive")}
+    line_ms = h_total / link_khz
+    frame_ms = line_ms * v_total
+    ideal = line_ms * tv_khz
+    best = None
+    for v in (v_total, v_total - 1, v_total + 1):
+        for h in range(round(ideal) - 2, round(ideal) + 3):
+            err = abs(h * v / tv_khz - frame_ms)
+            key = (err, v != v_total, abs(h - ideal))
+            if best is None or key < best[0]:
+                best = (key, h, v)
+    _, h, v = best
+    fits = [(w, l) for w, l in TV_AREAS
+            if width <= w <= h - H_BLANK_MIN and height <= l <= v - V_BLANK_MIN]
+    aw, al = fits[0] if fits else (width, height)
+    if aw > h - H_BLANK_MIN or al > v - V_BLANK_MIN:
+        raise ValueError(f"a {width}x{height} picture does not fit a "
+                         f"{h}x{v} raster at {tv_khz} kHz")
+    hb, vb = h - aw, v - al
+    hfp, hsync = max(1, round(hb * 0.314)), max(1, round(hb * 0.157))
+    vfp, vsync = max(1, round(vb * 0.089)), max(1, round(vb * 0.111))
+    return {"pixel_khz": tv_khz, "h_total": h, "v_total": v,
+            "h_active": aw, "v_active": al,
+            "hs_beg": aw + hfp, "hs_end": aw + hfp + hsync,
+            "vs_beg": al + vfp, "vs_end": al + vfp + vsync,
+            "hsync_positive": 1, "vsync_positive": 1}
+
+
+def display_clock(clocks, width: int, height: int, link_khz: int = 0,
+                  h_total: int = 0) -> int:
+    """Which of the board's display clocks a `width` x `height` picture
+    goes out at, its link line `h_total` pixels at `link_khz`. A TV takes
+    a 480-line picture only as 480p, at 480p's own 27 MHz; anything taller
+    at the slowest clock whose line -- the link's line time at that clock
+    -- still holds the TV area's width and its blanking, so a frame rate
+    the slower clock cannot carry is carried by a faster one. The
+    knowledge is this daemon's, not the firmware's."""
+    clocks = sorted(int(c) for c in clocks)
+    if height <= 480 and 27000 in clocks:
+        return 27000
+    area_w = next((w for w, l in sorted(TV_AREAS)
+                   if width <= w and height <= l), width)
+    for clk in (c for c in clocks if c != 27000):
+        if not h_total or h_total * clk / link_khz >= area_w + H_BLANK_MIN:
+            return clk
+    return clocks[-1]
+
+
+def firmware_init(status: dict, aaa: dict | None = None,
+                  tv_khz: int = TV_KHZ) -> str:
+    """The firmware's `init` for what the bridge streams: the sensor's
+    frame (from `bridge status`), the TV raster on the link's timing --
+    the link's clock and totals ARE the sensor's line and frame -- the
+    picture centred, the 3A settings. No rate appears: the TV raster
+    takes the link's line and frame times, whatever they are."""
+    from bayerlink.protocol import BAYER_PHASE
+
+    khz, ht, vt = (int(status[k]) for k in ("link_khz", "h_total", "v_total"))
+    tv = display_raster(int(status["width"]), int(status["height"]), khz,
+                        ht, vt, tv_khz)
     fields = {
         "frame.width": status["width"], "frame.height": status["height"],
         "frame.bits": status["bits"],
         "frame.bayer_phase": BAYER_PHASE[status["order"]],
-        "frame.line_ns": round(r.h_total * 1e6 / r.pixel_khz),
-        "frame.frame_lines": r.v_total,
-        **{f"display.{f}": int(getattr(r, f)) for f in (
+        **{f"display.{f}": int(tv[f]) for f in (
             "pixel_khz", "h_total", "v_total", "h_active", "v_active",
             "hs_beg", "hs_end", "vs_beg", "vs_end", "hsync_positive",
             "vsync_positive")},
         "window.center": 1,
-        **{f"aaa.{k}": int(v) for k, v in {**AAA_DEFAULT,
-                                            **(aaa or {})}.items()},
+        # the longest integration the line lock allows: the bridge's
+        # bound, which a caller's own limit may only tighten
+        **{f"aaa.{k}": int(v) for k, v in {
+            **AAA_DEFAULT,
+            **({"exposure_max": int(status["exposure_max"])}
+               if "exposure_max" in status else {}),
+            **(aaa or {})}.items()},
     }
     return "init " + " ".join(f"{k}={v}" for k, v in fields.items())
 
@@ -710,9 +803,17 @@ def _firmware_up(aaa: dict | None = None) -> str:
     why it could not be asked."""
     try:
         status = _bridge_status()
+        # the clock the board's display makes, as its firmware says
+        fw = _bridge_command("status")
+        tv = dict(t.split("=", 1) for t in fw.split() if "=" in t)
+        clocks = tv.get("tv_khz", str(TV_KHZ)).split(",")
         line = firmware_init({**status, "width": int(status["width"]),
                               "height": int(status["height"]),
-                              "bits": int(status["bits"])}, aaa)
+                              "bits": int(status["bits"])}, aaa,
+                             display_clock(clocks, int(status["width"]),
+                                           int(status["height"]),
+                                           int(status["link_khz"]),
+                                           int(status["h_total"])))
         return _bridge_command(line, timeout=15.0)
     except (OSError, KeyError, ValueError) as error:
         return f"err {error}"
@@ -1121,12 +1222,7 @@ def _handler(supervisor: Supervisor):
             if route == "/modules":
                 from . import modules_mgr
                 return self._send(200, modules_mgr.status())
-            if route == "/rasters":
-                # bayerlink's rasters, for the panel to offer the rates
-                # a frame can ride and to state the line budget
-                from bayerlink.rasters import RASTERS
-                return self._send(200, {name: {**r._asdict(), "hz": r.hz}
-                                        for name, r in RASTERS.items()})
+
             if route == "/bridge/status":
                 # The bridge is the real-time owner on this bench: it
                 # holds the sensor and the display and keeps the picture
@@ -1371,22 +1467,16 @@ def _handler(supervisor: Supervisor):
                         # it sits inside it and the header carries the
                         # truth. Disturbing the picture is the agreed
                         # price of changing geometry.
-                        # The mode is [width, height] or [width, height,
-                        # rate]; the rate picks the raster, so it is part
-                        # of what is compared.
+                        # The mode is the sensor's size; its rate is the
+                        # sensor's own, and the link follows it.
                         mode = spec.get("cam_mode")
-                        if mode and len(mode) in (2, 3):
-                            hz = int(mode[2]) if len(mode) == 3 else None
-                            want = (f"{int(mode[0])}x{int(mode[1])}"
-                                    + (f"@{hz}" if hz else ""))
+                        if mode and len(mode) >= 2:
+                            want = f"{int(mode[0])}x{int(mode[1])}"
                             now = ""
                             try:
                                 fields = _bridge_status()
                                 now = f"{fields.get('width')}x{fields.get('height')}"
-                                if hz:
-                                    from bayerlink.rasters import raster
-                                    now += f"@{raster(fields['raster']).hz}"
-                            except (OSError, KeyError):
+                            except OSError:
                                 pass
                             if want != now:
                                 env = Path("/run/bridge.env")

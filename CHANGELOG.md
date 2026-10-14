@@ -11,22 +11,25 @@ moves is named here.
 
 ### Added
 
-- **The mode, handed to modules, and a `mode` slot.** `--mode WxH@HZ`
-  chooses the raster from `bayerlink.rasters` (the on-device build
-  generates `rasters.h`; the bridge's own copy of the 1080p30 raster is
-  gone), and every link edge passes the mode -- raster, frame, lines --
-  to the modules. `bridge status` reports the raster.
+- **The link carries the sensor as it is.** The link raster is derived
+  from the sensor's own timing in its mode -- one sensor line a link line,
+  one frame a frame, at the link's clock (`--link-khz`, 74250 by default:
+  what the receiver is built for) -- so no frame rate is chosen anywhere;
+  the bridge's own copy of the 1080p30 modeline is gone. `--mode WxH` sets
+  the sensor's size and nothing else, and with no mode the bridge takes
+  the sensor's current one rather than assuming 1920x1080. Every link edge
+  hands modules the mode -- raster, frame, lines -- and `bridge status`
+  reports the link's clock and totals, the depth and the mosaic order.
 - **Slots for each 3A loop.** `ae`, `awb` and `af` replace the single
   `algo` slot: each loop is its own module.
 - **The firmware is brought up at what streams.** Starting the camera
-  sends the firmware module its `init` -- the frame from `bridge status`
-  (which now reports its depth and mosaic order), the raster it rides by
-  bayerlink's numbers, the 3A settings -- and the keeper does the same
+  sends the firmware module its `init` -- the frame and its timing from
+  `bridge status`, a TV raster in a familiar shape whose frame lasts as
+  long as the sensor's, the 3A settings -- and the keeper does the same
   once per bridge run, so a module installed, a reboot or a restart does
   not leave it waiting. `/status` carries its answer.
-- **The panel offers a rate.** Beside the sensor mode, the rates a raster
-  carries at that size (`GET /rasters`); the line budget is the chosen
-  raster's, not a fixed 2200.
+- **No line budget in the panel.** The link's line is the sensor's, so the
+  fixed 2200-slot budget the panel enforced is gone.
 
 - **`stream --source tof`**: an Arducam ToF depth camera's raw phase
   frames, through Arducam's SDK (which owns the sensor's configuration).

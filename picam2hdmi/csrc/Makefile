@@ -10,14 +10,8 @@ CFLAGS ?= -O2 -Wall -Wextra $(shell pkg-config --cflags libdrm)
 LDLIBS ?= $(shell pkg-config --libs libdrm) -lm
 SRC = $(wildcard *.c) $(wildcard modules/*.c) $(wildcard modules/*/*.c)
 
-# rasters.h is bayerlink's raster table, generated, never written here
-gen/rasters.h: bridge.h
-	@mkdir -p gen
-	python3 -c "from picam2hdmi.native import rasters_h; \
-	print(rasters_h(), end='')" > $@
-
-bridge: $(SRC) bridge.h gen/rasters.h
-	$(CC) $(CFLAGS) -I. -Igen -o $@ $(SRC) $(LDLIBS)
+bridge: $(SRC) bridge.h
+	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
 
 check: bridge
 	@./bridge --selftest --order GBRG > /tmp/bridge_c_headers
@@ -31,5 +25,5 @@ check: bridge
 	&& echo "check: C and Python headers byte-identical"
 
 clean:
-	rm -rf bridge gen
+	rm -f bridge
 .PHONY: check clean

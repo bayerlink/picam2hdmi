@@ -154,10 +154,6 @@
       <option value="1920x1080">1920x1080</option>
       <option value="2592x1944">2592x1944 (full)</option>
       <option value="640x480">640x480</option></select></label>
-    <!-- The rates a raster carries at this size, from bayerlink's
-         rasters (GET /rasters): the rate picks the raster. -->
-    <label>rate <select id="crate" onchange="applyFromFields()">
-      <option value="30">30</option></select></label>
 
     <!-- The crop controls, as ONE unit. A bridge bench puts `crop` in
          the daemon's `ignored` list, so every one of these is a control
@@ -330,11 +326,6 @@ function renderSources() {
   $('srclist').innerHTML = rows.join('');
 }
 
-function fetchRasters() {
-  api('GET', '/rasters').then(r => { rasters = r; rateOptions(); drawCrop(); })
-    .catch(() => {});
-}
-
 function fetchCameras() {
   api('GET', '/cameras')
     .then(r => {
@@ -369,39 +360,10 @@ const effective = () => useSelection ? crop
 const coversSensor = r => r.x === 0 && r.y === 0 &&
                           r.w === sensor.w && r.h === sensor.h;
 const GX = 4, GY = 2, MINW = 16, MINH = 16;
-let rasters = {};                 // bayerlink's, from GET /rasters
-
-/* The rasters a WxH frame rides -- the bridge's rule: its width inside
- * the active line, its lines and the header row before the vsync. */
-function carriers(w, h) {
-  return Object.values(rasters).filter(r =>
-    w <= r.h_active && h + 1 < r.vs_beg);
-}
-
-/* The line budget: the receiver takes one sample per clock, so a line
- * fits the raster's whole line time -- the slowest raster at the rate. */
-function slots() {
-  const hz = Number($('crate').value);
-  const ride = carriers(sensor.w, sensor.h).filter(r => r.hz === hz)
-    .sort((a, b) => a.pixel_khz - b.pixel_khz)[0];
-  return ride ? ride.h_total : 0;
-}
-
-function rateOptions() {
-  const sel = $('crate');
-  const was = sel.value;
-  const rates = [...new Set(carriers(sensor.w, sensor.h).map(r => r.hz))]
-    .sort((a, b) => a - b);
-  if (!rates.length) return;
-  sel.innerHTML = '';
-  for (const hz of rates) sel.add(new Option(String(hz), String(hz)));
-  sel.value = rates.includes(Number(was)) ? was : String(rates[0]);
-}
 
 function modeChanged() {
   const [w, h] = $('cmode').value.split('x').map(Number);
   sensor = {w, h};
-  rateOptions();
   crop = {x: 0, y: 0, w, h};   // old-mode coordinates mean nothing here
   useSelection = false;
   wire = null;          // another mode's stream would sit at wrong scale
@@ -433,15 +395,9 @@ function modeOptions(list, keep) {
 
 function seedCameraFields(src) {
   if (src.cam_mode) {
-    const value = src.cam_mode.slice(0, 2).join('x');
+    const value = src.cam_mode.join('x');
     haveMode(value);
     if ($('cmode').value !== value) { $('cmode').value = value; modeChanged(); }
-    if (src.cam_mode[2]) {
-      const hz = String(src.cam_mode[2]);
-      if (![...$('crate').options].some(o => o.value === hz))
-        $('crate').add(new Option(hz, hz));
-      $('crate').value = hz;
-    }
   }
 }
 
@@ -506,14 +462,11 @@ function drawCrop() {
     ` — sensor ${sensor.w}×${sensor.h}` +
     (useSelection && wire && !applied ? ' — applies on release' : '');
 
-  const SLOTS = slots();
-  const ok = win.w <= SLOTS;
-  const msg = ok
-    ? `within the raster's line budget (${win.w} of ${SLOTS} slots)`
-    : `exceeds the raster's line budget: ${win.w} > ${SLOTS} slots — narrow the crop`;
+  // The link carries the sensor's own line, whatever its width: its
+  // raster is derived from the sensor, so there is no budget to exceed.
   const budget = $('budget');
-  budget.textContent = msg;
-  budget.className = ok ? 'ok' : 'bad';
+  budget.textContent = `the link carries the sensor's ${win.w}-sample line as it is`;
+  budget.className = 'ok';
 }
 
 const snapX = v => Math.round(v / GX) * GX;
@@ -554,7 +507,7 @@ $('croparea').addEventListener('pointermove', e => {
   } else {
     // The width budget constrains the DRAG, not just the request: a box
     // wider than the link carries would make every release a refusal.
-    const maxW = Math.floor(slots() / GX) * GX;
+    const maxW = Math.floor(sensor.w / GX) * GX;
     if (m.includes('e')) w = snapX(clamp(s.w + dx, MINW,
                                          Math.min(maxW, sensor.w - s.x)));
     if (m.includes('s')) h = snapY(clamp(s.h + dy, MINH, sensor.h - s.y));
@@ -591,8 +544,7 @@ function applyCamera() {
   const base = (wireSpec && wireSpec.source === 'camera')
              ? {...wireSpec} : {};
   const spec = Object.assign(base, {source: 'camera',
-    cam_mode: [...$('cmode').value.split('x').map(Number),
-               Number($('crate').value)],
+    cam_mode: $('cmode').value.split('x').map(Number),
 });
   if (useSelection) spec.crop = [crop.x, crop.y, crop.w, crop.h];
   else delete spec.crop;
@@ -696,7 +648,7 @@ async function refresh() {
   // image, painted at the emitted window's place. Preloaded, so the
   // poll never paints a half-loaded image.
   const modeMatches = live && (src.cam_mode || [sensor.w, sensor.h])
-                        .slice(0, 2).join('x') === $('cmode').value;
+                        .join('x') === $('cmode').value;
   if (modeMatches) {
     const now = src.crop ? {x: src.crop[0], y: src.crop[1],
                             w: src.crop[2], h: src.crop[3]}
@@ -748,7 +700,6 @@ $('pwr').onclick = () => {
 
 drawCrop();
 refresh();
-fetchRasters();
 fetchCameras();
 setInterval(refresh, 1500);
 setInterval(fetchCameras, 30000);   // a reseated ribbon shows up by itself
