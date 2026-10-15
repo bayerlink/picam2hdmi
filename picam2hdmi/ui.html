@@ -90,6 +90,8 @@
   #drop { border: 1px dashed #30363d; border-radius: 6px; padding: .8rem;
           text-align: center; color: #8b949e; margin-top: .6rem; }
   #drop input { max-width: 100%; }
+  #imgopts { color: #8b949e; font-size: .85rem; margin: .4rem 0; }
+  #imgopts input { width: 4.5rem; }
   #drop.hot { border-color: #3fb950; color: #3fb950; }
   footer { color: #57606a; font-size: .8rem; margin-top: 1rem; }
   section.below { background: #161b22; border: 1px solid #30363d;
@@ -239,7 +241,10 @@
   <aside id="sources">
     <h2>Source</h2>
     <div id="srclist"></div>
-    <div id="drop">drop a .npy recording here, or
+    <div id="imgopts" hidden>images at
+      <input type="number" id="ifps" min="1" max="60" step="1"
+             placeholder="raster" title="frames a second; empty: one frame each raster frame"> fps</div>
+    <div id="drop">drop a .npy recording or raw Bayer image here, or
       <input type="file" id="file" accept=".npy"></div>
   </aside>
 </main>
@@ -272,6 +277,7 @@ async function api(method, path, body) {
 let chosen = null;                 // {kind: off|camera|file|pattern, id}
 let cameras = [];                  // [{index, model}] from /cameras
 let spool = [];
+let kinds = {};                    // spool name -> recording | image
 let liveKey = 'off';               // what the wire says is streaming
 const key = (kind, id) => kind + ':' + id;
 
@@ -299,6 +305,11 @@ function chooseSource(kind, id) {
   renderSources();
   if (kind === 'off') setSource({source: 'off'});
   else if (kind === 'camera') applyCamera();
+  else if (kind === 'image') {
+    const fps = Number($('ifps').value);
+    setSource(Object.assign({source: 'image', file: id},
+                            fps > 0 ? {fps} : {}));
+  }
   else setSource({source: 'file', file: id});
 }
 
@@ -320,9 +331,15 @@ function renderSources() {
   if (cameras.length)
     rows.push('<div class="grp">cameras</div>',
       ...cameras.map(c => row('camera', c.index, c.model)));
-  if (spool.length)
+  const images = spool.filter(n => kinds[n] === 'image');
+  const recordings = spool.filter(n => kinds[n] !== 'image');
+  if (recordings.length)
     rows.push('<div class="grp">recordings</div>',
-      ...spool.map(n => row('file', n, n, acts(n))));
+      ...recordings.map(n => row('file', n, n, acts(n))));
+  if (images.length)
+    rows.push('<div class="grp">images</div>',
+      ...images.map(n => row('image', n, n, acts(n))));
+  $('imgopts').hidden = !images.length;
   $('srclist').innerHTML = rows.join('');
 }
 
@@ -604,6 +621,8 @@ function seedFrom(src) {
     chosen = {kind: 'camera', id: 0};
   } else if (src.source === 'file') {
     chosen = {kind: 'file', id: src.file};
+  } else if (src.source === 'image') {
+    chosen = {kind: 'image', id: src.file};
   } else {
     chosen = {kind: 'off', id: '0'};
   }
@@ -641,6 +660,7 @@ async function refresh() {
   liveKey = !s.running ? 'off:0'
     : src.source === 'camera' ? 'camera:0'
     : src.source === 'file' ? 'file:' + src.file
+    : src.source === 'image' ? 'image:' + src.file
     : src.source === 'pattern' ? 'pattern:' + src.pattern
     : 'off:0';
 
@@ -666,6 +686,7 @@ async function refresh() {
     drawCrop();
   }
   spool = s.spool;
+  kinds = s.kinds || {};
   renderSources();
 }
 
@@ -690,6 +711,10 @@ drop.addEventListener('dragleave', () => drop.classList.remove('hot'));
 drop.addEventListener('drop', e => { e.preventDefault();
   drop.classList.remove('hot');
   for (const f of e.dataTransfer.files) upload(f); });
+// a new rate for the image playing applies at once
+$('ifps').addEventListener('change', () => {
+  if (chosen && chosen.kind === 'image') chooseSource('image', chosen.id);
+});
 $('file').addEventListener('change',
   e => { for (const f of e.target.files) upload(f); });
 

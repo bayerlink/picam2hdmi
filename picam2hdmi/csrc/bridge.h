@@ -49,8 +49,10 @@ struct bridge_raster {
  * the header row above -- `lines` active lines on the wire. */
 struct bridge_mode {
     const struct bridge_raster *raster;
-    uint32_t width, height;     /* the sensor's frame */
+    uint32_t width, height;     /* the frame: the sensor's, or the clip's */
     uint32_t lines;             /* active lines scanned: height + header */
+    int sensor;                 /* 1: a sensor streams; 0: a clip does, and
+                                   there is no sensor to set */
 };
 
 /* The LINK hook: called once after start-up with the initial state,

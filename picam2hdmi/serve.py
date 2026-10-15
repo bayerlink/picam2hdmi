@@ -169,6 +169,10 @@ class Supervisor:
             if alive and self._started else 0,
             "last_error": self.last_error,
             "spool": sorted(p.name for p in self.spool.glob("*.npy")),
+            # what each is: a recording (containers, replayed on the
+            # camera's timing) or an image (raw Bayer, played as a mode)
+            "kinds": {p.name: spool_kind(p)
+                      for p in sorted(self.spool.glob("*.npy"))},
         }
 
     # -- control ---------------------------------------------------------------
@@ -427,7 +431,8 @@ class Supervisor:
         restarted all leave it waiting for an init. Tried once per run:
         a firmware that refuses says why in status, not every beat."""
         desired = self.stored_spec() or {}
-        if desired.get("source") != "camera" or not _bridge_owns_bench():
+        if (desired.get("source") not in ("camera", "image")
+                or not _bridge_owns_bench()):
             return False
         try:
             status = _bridge_status()
@@ -437,7 +442,9 @@ class Supervisor:
         if not fw.startswith("ok ") or " build=proven" in fw:
             return False                   # no firmware, or already up
         run = round(time.time() - float(status.get("uptime", 0)))
-        return self.firmware_now(desired.get("aaa"), run, once=True) is not None
+        aaa = ({"ae": 0, "awb": 0, "af": 0}
+               if desired.get("source") == "image" else desired.get("aaa"))
+        return self.firmware_now(aaa, run, once=True) is not None
 
     def firmware_now(self, aaa: dict | None = None, run: int | None = None,
                      once: bool = False) -> str | None:
@@ -753,7 +760,8 @@ def sensor_timing(mode: dict, clocks, link_khz: int,
         near = round(tv_line * pr)
         found = None
         for line in range(max(line_min, near - reach), near + reach + 1):
-            ht = math.ceil(line / pr * link_khz * 1000.0)
+            # as the bridge rounds it, floating point and all
+            ht = math.ceil(line / pr * link_khz * 1000.0 - 1e-6)
             ht += ht & 1
             if not fits_line_rate(w, ht):
                 continue
@@ -778,13 +786,14 @@ def sensor_timing(mode: dict, clocks, link_khz: int,
         key = (r.h_active * r.v_active, -r.pixel_khz * 1e3 /
                (r.h_total * r.v_total))
         if best is None or key < best[0]:
-            best = (key, {"raster": name, "line_ns": ns,
+            best = (key, {"raster": name, "line_ns": ns, "line": line,
                           "frame_lines": frame})
     return best[1] if best else None
 
 
 def display_raster(width: int, height: int, link_khz: int, h_total: int,
-                   v_total: int, tv_khz: int = TV_KHZ) -> dict:
+                   v_total: int, tv_khz: int = TV_KHZ,
+                   counters: tuple = (12, 11)) -> dict:
     """The TV raster for a `width` x `height` picture on a link of
     `h_total` x `v_total` at `link_khz`: its TIMING the link's -- a line
     lasts as long as a link line, a frame as long as a link frame, so the
@@ -804,12 +813,20 @@ def display_raster(width: int, height: int, link_khz: int, h_total: int,
     frame_ms = line_ms * v_total
     ideal = line_ms * tv_khz
     best = None
-    for v in (v_total, v_total - 1, v_total + 1):
-        for h in range(round(ideal) - 2, round(ideal) + 3):
+    # within the display's counters: a raster it cannot count to is none
+    h_cap, v_cap = (1 << counters[0]) - 1, (1 << counters[1]) - 1
+    for v in (n for n in (v_total, v_total - 1, v_total + 1) if n <= v_cap):
+        for h in (n for n in range(round(ideal) - 2, round(ideal) + 3)
+                  if n <= h_cap):
             err = abs(h * v / tv_khz - frame_ms)
             key = (err, v != v_total, abs(h - ideal))
             if best is None or key < best[0]:
                 best = (key, h, v)
+    if best is None:
+        raise ValueError(
+            f"a {h_total}x{v_total} link at {link_khz / 1000:g} MHz is a "
+            f"display line of {round(ideal)} at {tv_khz / 1000:g} MHz, past "
+            f"the display's counters ({counters[0]} by {counters[1]} bits)")
     _, h, v = best
     fits = [(w, l) for w, l in TV_AREAS
             if width <= w <= h - H_BLANK_MIN and height <= l <= v - V_BLANK_MIN]
@@ -834,15 +851,17 @@ def display_clock(clocks, width: int, height: int, link_khz: int = 0,
     a 480-line picture only as 480p, at 480p's own 27 MHz; anything taller
     at the slowest clock whose line -- the link's line time at that clock
     -- still holds the TV area's width and its blanking, so a frame rate
-    the slower clock cannot carry is carried by a faster one. The
-    knowledge is this daemon's, not the firmware's."""
+    the slower clock cannot carry is carried by a faster one -- 480p's own
+    among them for a link line so long only it keeps the display's line
+    inside its counters, a slow clip's. The knowledge is this daemon's, not
+    the firmware's."""
     width, height = shown(width, height)
     clocks = sorted(int(c) for c in clocks)
     if height <= 480 and 27000 in clocks:
         return 27000
     area_w = next((w for w, l in sorted(TV_AREAS)
                    if width <= w and height <= l), width)
-    for clk in (c for c in clocks if c != 27000):
+    for clk in (c for c in clocks if c != 27000 or h_total):
         if not h_total or h_total * clk / link_khz >= area_w + H_BLANK_MIN:
             return clk
     return clocks[-1]
@@ -867,7 +886,8 @@ def parse_modes(reply: str) -> list[dict]:
 
 
 def firmware_init(status: dict, aaa: dict | None = None,
-                  tv_khz: int = TV_KHZ, modes: list | None = None) -> str:
+                  tv_khz: int = TV_KHZ, modes: list | None = None,
+                  counters: tuple = (12, 11)) -> str:
     """The firmware's `init` for what the bridge streams: the sensor's
     mode, by the name the sensor module gives it (from `modes`) -- the
     frame comes with it -- or, where the module states no mode of this
@@ -879,7 +899,7 @@ def firmware_init(status: dict, aaa: dict | None = None,
 
     khz, ht, vt = (int(status[k]) for k in ("link_khz", "h_total", "v_total"))
     tv = display_raster(int(status["width"]), int(status["height"]), khz,
-                        ht, vt, tv_khz)
+                        ht, vt, tv_khz, counters)
     mode = next((m["name"] for m in modes or ()
                  if (m["width"], m["height"], m["bits"]) ==
                  (int(status["width"]), int(status["height"]),
@@ -928,6 +948,162 @@ def _timing_args(want: str, bridge: dict) -> str:
     return f" --line-ns {timing['line_ns']} --frame-lines {timing['frame_lines']}"
 
 
+def clip_timing(width: int, height: int, clocks, link_khz: int,
+                isp_khz: int, fps: float | None = None,
+                counters: tuple = (12, 11)) -> dict:
+    """The link timing a clip of `width` x `height` frames runs on: a mode
+    like a sensor's, its pixel rate the link's clock, so its line is
+    counted in link clocks, and its least line and frame what carries it
+    -- a line no shorter than the width (bayerlink's rate rule) nor than
+    the ISP, taking a sample a cycle at `isp_khz`, can drain it, and a
+    frame of the picture and the least blanking. With no `fps`, planned
+    onto a raster of the TV's table by `sensor_timing`, the camera's rule.
+
+    With `fps`, the link runs at exactly that rate -- one clip frame a link
+    frame, so the ISP sees the rate asked for -- and the display follows
+    it, as it must with no frame store: the planned line kept and the
+    frame made as long as the rate takes, so a new rate is a new frame
+    length and nothing else. Where that frame would not fit the display's
+    counters (`counters`: its bits of pixels and lines) or the picture,
+    the line moves to the nearest that fits. No floor is applied: a TV
+    that cannot follow a rate shows no signal, which is the truth.
+    {"raster", "line_clocks", "frame_lines", "repeat", "hz"}; a rate the
+    link cannot carry at all is refused."""
+    import math
+    line_min = width if not isp_khz else max(
+        width, math.ceil(width * link_khz / isp_khz))
+    frame_min = height + 10
+    mode = {"width": width, "height": height,
+            "pixel_rate_hz": link_khz * 1000, "line_length_pck": line_min,
+            "frame_length_lines": frame_min}
+    planned = sensor_timing(mode, clocks, link_khz, 0)
+    even = lambda n: n + (n & 1)
+    line = planned["line"] if planned else line_min
+    frame = planned["frame_lines"] if planned else frame_min
+    if fps:
+        xb, yb = counters
+        v_max = (1 << yb) - 1
+
+        def fits(ht, v):
+            clk = display_clock(clocks, width, height, link_khz, ht)
+            return (frame_min <= v <= v_max
+                    and ht * clk / link_khz < (1 << xb))
+        rate = lambda ht: round(link_khz * 1e3 / (ht * fps))
+        if not fits(even(line), rate(even(line))):
+            # the line the rate needs: long enough that the frame fits the
+            # counters, short enough that the picture fits the frame
+            longest = even(math.floor(link_khz * 1e3 / (fps * frame_min)))
+            shortest = even(math.ceil(link_khz * 1e3 / (fps * v_max)))
+            line = max(even(line_min), min(longest, max(shortest, even(line))))
+            if not fits(line, rate(line)):
+                top = link_khz * 1e3 / (even(line_min) * frame_min)
+                # the longest link line whose display line the counters
+                # hold, at the slowest clock the board makes
+                ht_cap = ((1 << xb) - 1) * link_khz / min(clocks)
+                low = link_khz * 1e3 / (ht_cap * v_max)
+                raise ValueError(
+                    f"{fps:g} fps does not fit a {width}x{height} clip on a "
+                    f"{link_khz / 1000:g} MHz link and this display: "
+                    f"{low:.1f} to {top:.1f} fps")
+        frame = rate(even(line))
+    ht = even(math.ceil(line - 1e-6))
+    return {"raster": planned["raster"] if planned and not fps else None,
+            "line_clocks": line, "frame_lines": frame, "repeat": 1,
+            "hz": link_khz * 1e3 / (ht * frame)}
+
+
+def spool_kind(path: Path) -> str:
+    """What a spool file is, by its array alone: "recording" -- bayerlink
+    containers, bytes of three lanes, (H, W, 3) or (N, H, W, 3) -- or
+    "image", raw Bayer samples, (H, W) or (N, H, W) integers; "unknown"
+    for anything else, which neither plays."""
+    import numpy as np
+    try:
+        a = np.load(path, mmap_mode="r")
+    except (OSError, ValueError):
+        return "unknown"
+    if a.dtype == np.uint8 and a.ndim in (3, 4) and a.shape[-1] == 3:
+        return "recording"
+    if np.issubdtype(a.dtype, np.integer) and a.ndim in (2, 3):
+        return "image"
+    return "unknown"
+
+
+IMAGE_CLIP = "/run/bridge-image.raw"
+IMAGE_CLIP_MAX = 64 << 20               # /run is RAM; a clip is a test
+
+
+def prepare_image(path: Path, bits: int) -> tuple:
+    """A raw Bayer .npy -- one frame (H, W) or several (N, H, W), samples
+    of `bits` bits -- into the packed payload frames a clip run plays, by
+    bayerlink's own packing. Returns (frames, height, width)."""
+    import numpy as np
+    from bayerlink.protocol import pack_samples
+
+    a = np.load(path, mmap_mode="r")
+    if a.ndim == 2:
+        a = a[None]
+    if a.ndim != 3 or not np.issubdtype(a.dtype, np.integer):
+        raise ValueError(f"{path.name}: a raw Bayer image is (H, W) or "
+                         f"(N, H, W) integers, not {a.dtype} {a.shape}")
+    n, h, w = a.shape
+    if a.max() >= 1 << bits or a.min() < 0:
+        raise ValueError(f"{path.name}: samples run {int(a.min())}.."
+                         f"{int(a.max())}, outside {bits} bits")
+    per = h * w * bits // 8
+    if n * per > IMAGE_CLIP_MAX:
+        raise ValueError(f"{path.name}: {n} frames of {per} bytes is more "
+                         f"than the {IMAGE_CLIP_MAX >> 20} MB a clip may "
+                         "take of the Pi's memory")
+    with open(IMAGE_CLIP + ".new", "wb") as out:
+        for frame in a:
+            out.write(pack_samples(np.asarray(frame), bits).tobytes())
+    Path(IMAGE_CLIP + ".new").rename(IMAGE_CLIP)
+    return n, h, w
+
+
+def image_args(spec: dict, spool: Path, bridge: dict, firmware: dict) -> str:
+    """The bridge's clip-run options for an `image` source: the image
+    packed into its clip, its timing planned from the link the bridge
+    runs on, the display clocks the board makes and the ISP's clock."""
+    name = str(spec.get("file", ""))
+    path = spool / name
+    if path.name != name or not name.endswith(".npy") or not path.exists():
+        raise ValueError(f"no image {name!r} in the spool")
+    bits = int(spec.get("bits", 10))
+    n, h, w = prepare_image(path, bits)
+    return image_plan(spec, w, h, bridge, firmware)
+
+
+def image_plan(spec: dict, w: int, h: int, bridge: dict,
+               firmware: dict) -> str:
+    """The clip-run options for a `w` x `h` image at the rate `spec` asks:
+    the link it runs on, the display clocks the board makes, its counters
+    and the ISP's clock, as the firmware states them."""
+    bits = int(spec.get("bits", 10))
+    order = str(spec.get("order", "GBRG"))
+    clocks = [int(c) for c in firmware.get("tv_khz", str(TV_KHZ)).split(",")]
+    counters = tuple(int(n) for n in
+                     firmware.get("counters", "12x11").split("x"))
+    t = clip_timing(w, h, clocks, int(bridge["link_khz"]),
+                    int(firmware.get("isp_khz", 0)), spec.get("fps"),
+                    counters)
+    return (f"--clip {IMAGE_CLIP} --size {w}x{h} --bits {bits} "
+            f"--order {order} --line-clocks {t['line_clocks']} "
+            f"--frame-lines {t['frame_lines']} --repeat {t['repeat']}")
+
+
+CAMERA_ENV = Path("/run/bridge.camera.env")
+
+
+def _bridge_plays_clip() -> bool:
+    """Whether the bridge runs a clip, with no sensor."""
+    try:
+        return _bridge_status().get("sensor") == "0"
+    except OSError:
+        return False
+
+
 def _bridge_status() -> dict:
     """`bridge status`, as a dict of its fields."""
     r = _bridge_command("bridge status")
@@ -952,7 +1128,9 @@ def _firmware_up(aaa: dict | None = None) -> str:
                                            int(status["height"]),
                                            int(status["link_khz"]),
                                            int(status["h_total"])),
-                             modes=parse_modes(_bridge_command("modes")))
+                             modes=parse_modes(_bridge_command("modes")),
+                             counters=tuple(int(n) for n in tv.get(
+                                 "counters", "12x11").split("x")))
         return _bridge_command(line, timeout=15.0)
     except (OSError, KeyError, ValueError) as error:
         return f"err {error}"
@@ -1055,6 +1233,12 @@ def route_to_bridge(spec: dict, spool: Path) -> str | None:
     was a second copy of a decision.
     """
     wanted = spec.get("source")
+    if wanted == "image":
+        # the bridge's by construction: it plays the image from start-up
+        if _bridge_up() and _bridge_plays_clip():
+            return "image"
+        raise ValueError("an image plays only through the bridge, which is "
+                         "not playing one")
     if wanted not in ("camera", "file") or not _bridge_up():
         return None
     if wanted == "camera":
@@ -1619,6 +1803,14 @@ def _handler(supervisor: Supervisor):
                         # The mode is the sensor's size; its rate is the
                         # sensor's own, and the link follows it.
                         mode = spec.get("cam_mode")
+                        playing = _bridge_plays_clip()
+                        if playing and not (mode and len(mode) >= 2):
+                            # back from a clip run, to the camera as it was
+                            back = CAMERA_ENV.read_text().split("=", 1)[1] \
+                                if CAMERA_ENV.exists() else ""
+                            back = back.strip()
+                            mode = back.split()[1].split("x") \
+                                if back.startswith("--mode ") else None
                         if mode and len(mode) >= 2:
                             want = f"{int(mode[0])}x{int(mode[1])}"
                             now, args = "", f"--mode {want}"
@@ -1628,7 +1820,7 @@ def _handler(supervisor: Supervisor):
                                 args += _timing_args(want, fields)
                             except OSError:
                                 pass
-                            if want != now:
+                            if want != now or playing:
                                 env = Path("/run/bridge.env")
                                 # Keep what worked. A mode the link
                                 # cannot carry must not leave the bench
@@ -1676,6 +1868,92 @@ def _handler(supervisor: Supervisor):
                                        "it was built for and drives "
                                        "exposure and gain from its own "
                                        "loop; these were not applied"}
+                        return self._send(200, status)
+                    if wanted == "image" and spec.get("file") and _bridge_up():
+                        # A raw image is a MODE, like the sensor's: its
+                        # size and depth the image's, its timing planned
+                        # onto a raster of the TV's table -- by the rule
+                        # that plans the camera's -- and the bridge restarts
+                        # on it with no sensor at all, the clip paced by the
+                        # display. The camera's options are kept to come
+                        # back to.
+                        supervisor.stop()
+                        import re
+                        stored = supervisor.stored_spec() or {}
+                        playing = _bridge_plays_clip()
+                        same_image = (playing
+                                      and stored.get("source") == "image"
+                                      and all(stored.get(k) == spec.get(k)
+                                              for k in ("file", "bits",
+                                                        "order")))
+                        try:
+                            fw = dict(t.split("=", 1) for t in
+                                      _bridge_command("status").split()
+                                      if "=" in t)
+                            bridge = _bridge_status()
+                            # the image playing needs no packing again:
+                            # only its rate moves
+                            args = (image_plan(spec, int(bridge["width"]),
+                                               int(bridge["height"]),
+                                               bridge, fw)
+                                    if same_image else
+                                    image_args(spec, supervisor.spool,
+                                               bridge, fw))
+                        except (OSError, ValueError, KeyError) as error:
+                            return self._send(400, {"error": str(error)})
+                        env = Path("/run/bridge.env")
+                        before = env.read_text() if env.exists() else None
+                        running = before.split("=", 1)[1].strip() \
+                            if before else ""
+                        timing = lambda a: re.sub(
+                            r" --(frame-lines|repeat) \d+", "", a)
+                        frame = lambda a: (re.search(r"--frame-lines (\d+)",
+                                                     a) or [0, "0"])[1]
+                        if playing and timing(args) == timing(running):
+                            # the same link line, frame size and depth: the
+                            # smallest step that gets there -- a new image
+                            # put in live, a new rate a new frame length set
+                            # on the running display, nothing restarted
+                            steps = ([] if same_image else
+                                     [f"bridge play {IMAGE_CLIP}"])
+                            if frame(args) != frame(running):
+                                steps.append(f"bridge retime {frame(args)}")
+                            for line in steps:
+                                said = _bridge_command(line, timeout=5.0)
+                                if not said.startswith("ok"):
+                                    return self._send(400, {"error": said})
+                            env.write_text(f"BRIDGE_ARGS={args}\n")
+                            supervisor._persist_intent(spec)
+                            if frame(args) != frame(running):
+                                # the display follows the link's new frame
+                                supervisor.firmware_now(
+                                    {"ae": 0, "awb": 0, "af": 0})
+                            status = supervisor.status()
+                            status["playing"] = {"image": spec["file"],
+                                                 "by": "bridge", "args": args,
+                                                 "live": steps}
+                            return self._send(200, status)
+                        if before and not _bridge_plays_clip():
+                            CAMERA_ENV.write_text(before)
+                        env.write_text(f"BRIDGE_ARGS={args}\n")
+                        _bridge_service("restart")
+                        if not _bridge_up():
+                            if before is None:
+                                env.unlink(missing_ok=True)
+                            else:
+                                env.write_text(before)
+                            _bridge_service("restart")
+                            return self._send(503, {
+                                "error": _bridge_last_words() or
+                                "the bridge did not take the image",
+                                "reverted": True})
+                        supervisor._persist_intent(spec)
+                        # no sensor, so no 3A: the image is what it is
+                        supervisor.firmware_now(
+                            {"ae": 0, "awb": 0, "af": 0})
+                        status = supervisor.status()
+                        status["playing"] = {"image": spec["file"],
+                                             "by": "bridge", "args": args}
                         return self._send(200, status)
                     if wanted == "file" and spec.get("file") and _bridge_up():
                         # ONE engine: the bridge draws the clip into the

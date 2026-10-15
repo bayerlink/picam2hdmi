@@ -11,6 +11,19 @@ moves is named here.
 
 ### Added
 
+- **An image plays at the rate asked, and changes the least it can.** The
+  panel lists the spool's raw images apart from its recordings, each
+  played by the bridge with no sensor; an image's rate is the link's own
+  -- one image frame a link frame, so the ISP sees exactly it, and the TV
+  follows as it must with no frame store, with no floor applied. The
+  image's line is kept and the frame made as long as the rate takes;
+  where the display's counters (from the firmware's status) cannot reach
+  it, the line moves, down to 480p's clock for the longest. A new image of
+  the same size and timing goes in live (`bridge play`), a new rate on the
+  same line is a new frame length set on the running display (`bridge
+  retime`), and only anything else restarts the bridge. A rate the link
+  cannot carry is refused with the range it can.
+
 - **The link carries the sensor as it is.** The link raster is derived
   from the sensor's own timing in its mode -- one sensor line a link line,
   one frame a frame, at the link's clock -- the far end's, read from the
@@ -40,6 +53,19 @@ moves is named here.
   display for what the ISP's crop keeps of a frame bigger than any TV
   area, not for the frame. A recording made at the old width does not
   play.
+- **A raw image plays as a mode, with no sensor.** `PUT /source
+  {"source": "image", "file": "<name>.npy", "fps": N}` takes a raw Bayer
+  `.npy` from the spool -- one frame or several -- packs it by
+  bayerlink's own rule, and plans its timing as the camera's is planned:
+  a mode whose pixel rate is the link's clock, its line no shorter than
+  its width nor than the ISP (the firmware's `isp_khz`) can drain, onto
+  a raster of the TV's table. The bridge restarts as a clip run
+  (`--clip`, `--size`, `--bits`, `--line-clocks`, `--frame-lines`,
+  `--repeat`): no camera opened, frames paced by the display's vblank,
+  each shown `repeat` times for the rate asked; modules are told there
+  is no sensor (`bridge_mode.sensor`), and `bridge status` says
+  `sensor=0`. Choosing the camera after an image restores the camera's
+  options.
 - **No line budget in the panel.** The link's line is the sensor's, so the
   fixed 2200-slot budget the panel enforced is gone.
 

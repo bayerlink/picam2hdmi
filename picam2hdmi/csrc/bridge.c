@@ -216,6 +216,10 @@ static uint32_t link_width(const char *video, uint32_t w, uint32_t h,
                            int bits, uint32_t pixfmt) {
     uint32_t bytes = w * (uint32_t)bits / 8u;
     if (bytes < HEADER_BYTES) bytes = HEADER_BYTES;
+    if (!video) {                       /* no unicam: whole link pixels */
+        uint32_t cw = (bytes + 2u) / 3u;
+        return cw + (cw & 1u);
+    }
     int fd = open(video, O_RDWR | O_NONBLOCK);
     if (fd < 0) return 0;
     uint32_t cw = 0;
@@ -237,7 +241,9 @@ static int derive_raster(uint32_t w, uint32_t h, uint32_t cw,
                          double pixel_rate, int hblank, int vblank,
                          uint32_t link_khz) {
     double line_s = (w + hblank) / pixel_rate;
-    uint32_t ht = (uint32_t)ceil(line_s * link_khz * 1000.0);
+    /* rounded up, robust to the floating point a whole count carries --
+     * the panel rounds the same way, so a plan and a run agree */
+    uint32_t ht = (uint32_t)ceil(line_s * link_khz * 1000.0 - 1e-6);
     ht += ht & 1u;
     if (!cw || ht < cw + 48 || ht < w || vblank < 8) return -1;
     LINK.pixel_khz = link_khz;
@@ -494,6 +500,79 @@ static uint8_t *clip_map;
 static size_t clip_bytes, clip_frame_bytes, clip_frames, clip_at;
 static int clip_drawn;
 static int scratch_fd = -1;
+/* A clip run (--clip): no sensor at all, the link timed by the clip's
+ * own line and frame lengths and paced by the display's vblank. */
+static int CLIP_RUN;
+static uint32_t CLIP_REPEAT = 1;        /* vblanks each clip frame is shown */
+/* the clip a clip run plays: its frames mapped, and how many; `play`
+ * swaps in another of the same geometry without touching the link */
+static const uint8_t *CLIP;
+static size_t CLIP_SIZE, CLIP_FRAMES, CLIP_FBYTES;
+static int CLIP_NEW;                    /* drawn from its first frame next */
+/* what a clip run's link raster is made of, kept so `retime` can make it
+ * again with another frame length, on the same buffers */
+static struct {
+    int dfd, crtc_index;
+    uint32_t crtc, connector, base_fb, pay_fb, plane;
+    uint32_t cw, line, link_khz;
+} CLIP_MODE;
+
+/* The clip's frame `frame` lines long, the line unchanged: the link raster
+ * made again and set on the running display, the buffers kept -- no
+ * restart, so nothing but the mode itself changes on the cable. 0, or -1
+ * with `why` said. */
+static int clip_retime(uint32_t frame, char *why, size_t cap) {
+    if (frame < HEIGHT + 10 ||
+        derive_raster(WIDTH, HEIGHT, CLIP_MODE.cw, CLIP_MODE.link_khz * 1000.0,
+                      (int)CLIP_MODE.line - (int)WIDTH,
+                      (int)frame - (int)HEIGHT - LOCK_SPARE,
+                      CLIP_MODE.link_khz) < 0) {
+        snprintf(why, cap, "a %u-line frame does not fit a %ux%u clip on a "
+                 "%u-clock line", frame, WIDTH, HEIGHT, CLIP_MODE.line);
+        return -1;
+    }
+    set_raster(&LINK);
+    if (drmModeSetCrtc(CLIP_MODE.dfd, CLIP_MODE.crtc, CLIP_MODE.base_fb, 0, 0,
+                       &CLIP_MODE.connector, 1, &MODE) ||
+        drmModeSetPlane(CLIP_MODE.dfd, CLIP_MODE.plane, CLIP_MODE.crtc,
+                        CLIP_MODE.pay_fb, 0, 0, 1, CLIP_MODE.cw, HEIGHT,
+                        0, 0, CLIP_MODE.cw << 16, HEIGHT << 16)) {
+        snprintf(why, cap, "the display refused the %ux%u mode: %s",
+                 LINK.h_total, LINK.v_total, strerror(errno));
+        return -1;
+    }
+    printf("bridge: retimed, link raster %ux%u of %ux%u at %u kHz, %u Hz\n",
+           LINK.h_active, LINK.v_active, LINK.h_total, LINK.v_total,
+           CLIP_MODE.link_khz, LINK.hz);
+    return 0;
+}
+
+/* Map clip `path` for this run's geometry; 0, or -1 with `why` said. */
+static int clip_map_file(const char *path, char *why, size_t cap) {
+    int fd = open(path, O_RDONLY);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) < 0) {
+        snprintf(why, cap, "%s: %s", path, strerror(errno));
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    size_t frames = (size_t)st.st_size / CLIP_FBYTES;
+    if (!frames || (size_t)st.st_size % CLIP_FBYTES) {
+        snprintf(why, cap, "%s: %lld bytes is not whole frames of %zu",
+                 path, (long long)st.st_size, CLIP_FBYTES);
+        close(fd);
+        return -1;
+    }
+    const uint8_t *m = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    if (m == MAP_FAILED) {
+        snprintf(why, cap, "%s: %s", path, strerror(errno));
+        return -1;
+    }
+    if (CLIP) munmap((void *)CLIP, CLIP_SIZE);
+    CLIP = m; CLIP_SIZE = st.st_size; CLIP_FRAMES = frames; CLIP_NEW = 1;
+    return 0;
+}
 /* How many captures V4L2 holds at once. Named because two places need
  * it to agree: REQBUFS, and how many frames a still must be redrawn for
  * after a switch (see clip_drawn). */
@@ -526,9 +605,10 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
                  "width=%u height=%u bits=%d order=%s link_khz=%u "
                  "h_total=%u v_total=%u hz=%u lock_spare=%d exposure_max=%d "
                  "phase=%.2f margin=%.0f "
-                 "vblank=%d uptime=%ld exposure=%d gain=%d",
+                 "vblank=%d uptime=%ld exposure=%d gain=%d sensor=%d",
                  bstate.seq, bstate.locked, paused,
-                 clip_map ? "clip" : "sensor", WIDTH, HEIGHT,
+                 CLIP_RUN ? "file" : clip_map ? "clip" : "sensor", WIDTH,
+                 HEIGHT,
                  FORMATS[fmt_row].bits, FORMATS[fmt_row].order,
                  RASTER ? RASTER->pixel_khz : 0, RASTER ? RASTER->h_total : 0,
                  RASTER ? RASTER->v_total : 0, RASTER ? RASTER->hz : 0,
@@ -537,7 +617,53 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
                  bstate.margin,
                  bstate.vblank,
                  bstate.started ? (long)(time(NULL) - bstate.started) : 0L,
-                 exposure, gain);
+                 exposure, gain, !CLIP_RUN);
+        return;
+    }
+    unsigned want_frame;
+    if (sscanf(cmd, "retime %u", &want_frame) == 1) {
+        char why[256];
+        if (!CLIP_RUN) {
+            snprintf(reply, cap, "err retime is a clip run's");
+            return;
+        }
+        if (clip_retime(want_frame, why, sizeof why) < 0) {
+            snprintf(reply, cap, "err %s", why);
+            return;
+        }
+        snprintf(reply, cap, "ok %ux%u, %u Hz", LINK.h_total, LINK.v_total,
+                 LINK.hz);
+        return;
+    }
+    char play_path[160];
+    if (sscanf(cmd, "play %159s", play_path) == 1) {
+        char why[256];
+        if (!CLIP_RUN) {
+            snprintf(reply, cap, "err play is a clip run's");
+            return;
+        }
+        if (clip_map_file(play_path, why, sizeof why) < 0) {
+            snprintf(reply, cap, "err %s", why);
+            return;
+        }
+        snprintf(reply, cap, "ok %zu frame(s) from %s, on the same link",
+                 CLIP_FRAMES, play_path);
+        return;
+    }
+    unsigned want_repeat;
+    if (sscanf(cmd, "repeat %u", &want_repeat) == 1) {
+        if (!CLIP_RUN || want_repeat < 1) {
+            snprintf(reply, cap, "err repeat is a clip run's, at least 1");
+            return;
+        }
+        CLIP_REPEAT = want_repeat;
+        snprintf(reply, cap, "ok each clip frame shown %u time(s)",
+                 want_repeat);
+        return;
+    }
+    if (!strncmp(cmd, "source ", 7) && CLIP_RUN) {
+        snprintf(reply, cap, "err this run plays a clip and has no sensor; "
+                 "the source is the bridge's start-up choice");
         return;
     }
     if (!strncmp(cmd, "source ", 7)) {
@@ -723,7 +849,8 @@ static void link_watch(int force) {
     last = up;
     if (up) ddc_probe(conn_dir);
     BMODE = (struct bridge_mode){ .raster = RASTER, .width = WIDTH,
-                                  .height = HEIGHT, .lines = VDISP };
+                                  .height = HEIGHT, .lines = VDISP,
+                                  .sensor = !CLIP_RUN };
     struct bridge_link l = { .up = up, .edid = up ? edid : NULL,
                              .mode = &BMODE };
     printf("bridge: link %s\n", up ? "up" : "down");
@@ -970,6 +1097,201 @@ static int resolve_capture_node(char *out, size_t out_len) {
     return -1;
 }
 
+/* The display: its device, the connected connector and a CRTC that can
+ * reach it, waited for. 0, or 1 where none came. */
+static int open_display(int *dfd_out, uint32_t *conn_out, uint32_t *crtc_out,
+                        int *index_out) {
+    int dfd = open("/dev/dri/card1", O_RDWR);
+    if (dfd < 0) dfd = open("/dev/dri/card0", O_RDWR);
+    if (dfd < 0) die("open dri");
+    drmSetClientCap(dfd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+
+    /* The sink may not be there YET. At power-on the board downstream
+     * boots and loads its bitstream a minute or two after this Pi, and
+     * until it does there is no HDMI sink to drive. Refusing at once
+     * left the unit to burn its restart budget in seconds and end
+     * `failed` with the board seconds from ready. So a missing display
+     * is waited for -- BOUNDED, because one that never comes is the
+     * refusal it always was, and the unit must still end `failed`
+     * rather than wait forever. While it waits the bridge is running
+     * and owns the camera, which is the truth. */
+    enum { DISPLAY_WAIT_S = 300, DISPLAY_REPORT_S = 30 };
+    uint32_t connector_id = 0, crtc_id = 0;
+    int crtc_index = 0;
+    for (int waited = 0;; waited++) {
+        drmModeResPtr res = drmModeGetResources(dfd);
+        if (!res) die("GetResources");
+        for (int i = 0; i < res->count_connectors && !connector_id; i++) {
+            drmModeConnectorPtr c =
+                drmModeGetConnector(dfd, res->connectors[i]);
+            if (c && c->connection == DRM_MODE_CONNECTED) {
+                connector_id = c->connector_id;
+                /* The CRTC comes from the connector's ENCODERS' mask --
+                 * never from a guess. An all-ones fallback once picked
+                 * CRTC 0, which on vc4 is txp, the writeback engine: a
+                 * perfectly real CRTC that can never drive HDMI, and an
+                 * EINVAL that names no names. The encoder knows which
+                 * CRTCs can reach the wire; ask it. */
+                uint32_t possible = 0;
+                for (int j = 0; j < c->count_encoders; j++) {
+                    drmModeEncoderPtr e =
+                        drmModeGetEncoder(dfd, c->encoders[j]);
+                    if (!e) continue;
+                    if (e->crtc_id && !crtc_id) crtc_id = e->crtc_id;
+                    possible |= e->possible_crtcs;
+                    drmModeFreeEncoder(e);
+                }
+                for (int k = 0; k < res->count_crtcs; k++)
+                    if (crtc_id ? res->crtcs[k] == crtc_id
+                                : (possible & (1u << k))) {
+                        crtc_id = res->crtcs[k]; crtc_index = k; break;
+                    }
+            }
+            drmModeFreeConnector(c);
+        }
+        drmModeFreeResources(res);
+        if (connector_id && crtc_id) break;
+        connector_id = crtc_id = 0;
+        crtc_index = 0;
+        if (waited >= DISPLAY_WAIT_S) {
+            fprintf(stderr, "no connected connector/CRTC after %d s\n",
+                    DISPLAY_WAIT_S);
+            close(dfd);
+            return 1;
+        }
+        if (waited % DISPLAY_REPORT_S == 0)
+            printf("bridge: no display connected yet -- waiting for the "
+                   "sink (%d s of %d)\n", waited, DISPLAY_WAIT_S);
+        sleep(1);
+    }
+    force_full_range(dfd, connector_id);
+    *dfd_out = dfd; *conn_out = connector_id; *crtc_out = crtc_id;
+    *index_out = crtc_index;
+    return 0;
+}
+
+/* The link's clock is the far end's: its receiver is built for one, and
+ * it says which in its EDID -- the first detailed timing, the container
+ * it prefers. A sink that states none gets the 1080p30 family's 74.25
+ * MHz. --link-khz overrides. */
+static uint32_t sink_link_khz(void) {
+    uint8_t *e = NULL;
+    link_read_state(&e);
+    uint32_t clk = e ? (uint32_t)(e[54] | e[55] << 8) * 10u : 0;
+    printf("bridge: link at %u kHz, %s\n", clk ? clk : 74250u,
+           clk ? "as the sink's EDID prefers" : "the sink stating none");
+    return clk ? clk : 74250u;
+}
+
+/* A CLIP RUN: no sensor. The clip is raw payload frames -- each `h`
+ * packed lines of the format's bytes, tightly -- and the link is timed by
+ * the clip's own line (in link clocks) and frame (in lines), which
+ * whoever plans it chose; frames are paced by the display's own vblank,
+ * each shown `repeat` times. The bridge writes the header, as it does for
+ * the sensor. Every hook runs as usual, with no sensor to hand on. */
+static int run_clip(const char *path, uint32_t w, uint32_t h, int row,
+                    uint32_t line, uint32_t frame, uint32_t repeat,
+                    uint32_t link_khz, int seconds) {
+    CLIP_RUN = 1;
+    fmt_row = row; WIDTH = w; HEIGHT = h;
+    const size_t bytes = (size_t)w * FORMATS[row].bits / 8u;
+    CLIP_FBYTES = bytes * h;
+    char why[256];
+    if (clip_map_file(path, why, sizeof why) < 0) {
+        fprintf(stderr, "bridge: %s\n", why);
+        return 1;
+    }
+    signal(SIGINT, on_sig); signal(SIGTERM, on_sig);
+
+    int dfd = -1, crtc_index = 0;
+    uint32_t connector_id = 0, crtc_id = 0;
+    if (open_display(&dfd, &connector_id, &crtc_id, &crtc_index)) return 1;
+    if (!link_khz) link_khz = sink_link_khz();
+    if (!line) line = w;                     /* the rate rule's least */
+    if (!frame) frame = h + 1 + 8 + LOCK_SPARE;
+    if (repeat < 1) repeat = 1;
+    CLIP_REPEAT = repeat;
+    uint32_t cw = link_width(NULL, w, h, FORMATS[row].bits, 0);
+    if (line < w || frame < h + 10 ||
+        derive_raster(w, h, cw, link_khz * 1000.0, (int)line - (int)w,
+                      (int)frame - (int)h - LOCK_SPARE, link_khz) < 0) {
+        fprintf(stderr, "bridge: a %ux%u clip does not fit a %u-clock "
+                "line and %u-line frame at %u kHz\n", w, h, line, frame,
+                link_khz);
+        return 1;
+    }
+    set_raster(&LINK);
+    printf("bridge: clip %s: %zu %ux%u %s %d-bit frame(s), link raster "
+           "%ux%u of %ux%u at %u kHz, %u Hz, each frame shown %u time(s)\n",
+           path, CLIP_FRAMES, w, h, FORMATS[row].order, FORMATS[row].bits,
+           LINK.h_active, LINK.v_active, LINK.h_total, LINK.v_total,
+           link_khz, LINK.hz, repeat);
+
+    const uint32_t CW = LINK.h_active;
+    struct dumb base = make_fb(dfd, CW, VDISP);
+    struct dumb pay = make_fb(dfd, CW, HEIGHT);
+    if (drmModeSetCrtc(dfd, crtc_id, base.fb_id, 0, 0, &connector_id, 1,
+                       &MODE))
+        die("SetCrtc");
+    uint32_t plane = overlay_plane(dfd, crtc_index);
+    if (drmModeSetPlane(dfd, plane, crtc_id, pay.fb_id, 0,
+                        0, 1, CW, HEIGHT,
+                        0, 0, CW << 16, HEIGHT << 16))
+        die("SetPlane");
+    base_map_ro = base.map;
+    bstate.payload_map = pay.map;
+    bstate.payload_pitch = pay.pitch;
+    bstate.locked = 1;
+    CLIP_MODE.dfd = dfd; CLIP_MODE.crtc_index = crtc_index;
+    CLIP_MODE.crtc = crtc_id; CLIP_MODE.connector = connector_id;
+    CLIP_MODE.base_fb = base.fb_id; CLIP_MODE.pay_fb = pay.fb_id;
+    CLIP_MODE.plane = plane; CLIP_MODE.cw = CW;
+    CLIP_MODE.line = line; CLIP_MODE.link_khz = link_khz;
+    bstate.started = time(NULL);
+    link_watch(1);
+    ctl_open();
+
+    /* Each frame is drawn at the vblank before it is scanned: the copy
+     * runs far faster than the beam, so it stays ahead of it, as the
+     * sensor's writes do. */
+    uint32_t seq = 0, shown = 0;
+    size_t at = 0;
+    time_t t0 = time(NULL);
+    while (running && (seconds <= 0 || time(NULL) - t0 < seconds)) {
+        drmVBlank vb = {.request = {
+            .type = DRM_VBLANK_RELATIVE
+                  | ((crtc_index << DRM_VBLANK_HIGH_CRTC_SHIFT)
+                     & DRM_VBLANK_HIGH_CRTC_MASK),
+            .sequence = 1}};
+        if (drmWaitVBlank(dfd, &vb)) {
+            fprintf(stderr, "bridge: WaitVBlank: %s\n", strerror(errno));
+            break;
+        }
+        pack_header(base.map, seq, SOURCE_ID_OV5647);
+        /* a new frame once the last has been shown its count -- which
+         * `repeat` may change while it plays */
+        if (CLIP_NEW) { at = 0; shown = 0; }
+        if (CLIP_NEW || (CLIP_FRAMES > 1 && ++shown >= CLIP_REPEAT)) {
+            CLIP_NEW = 0;
+            shown = 0;
+            const uint8_t *src = CLIP + at * CLIP_FBYTES;
+            for (uint32_t r = 0; r < HEIGHT; r++)
+                memcpy(pay.map + (size_t)r * pay.pitch, src + r * bytes,
+                       bytes);
+            at = (at + 1) % CLIP_FRAMES;
+        }
+        seq++;
+        bstate.seq = seq;
+        struct bridge_frame bf = {.seq = seq, .locked = 1, .sensor_fd = -1};
+        bridge_frame_hook(&bf);
+        if ((seq & 31) == 0) link_watch(0);
+        ctl_poll();
+    }
+    printf("bridge: %u frames of the clip\n", seq);
+    close(dfd);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     /* NO exposure, NO gain. They belong to the sensor package, where
      * the AE loop lives; this file knows GEOMETRY -- the raster, the
@@ -991,6 +1313,10 @@ int main(int argc, char **argv) {
     const char *want_order = NULL;
     int test_pattern = 0, selftest = 0;
     const char *video = NULL, *subdev = "/dev/v4l-subdev0";
+    /* a clip run: the clip, its frame, its depth, and its timing */
+    const char *clip_path = NULL;
+    unsigned clip_w = 0, clip_h = 0, clip_bits = 10, line_clocks = 0;
+    unsigned repeat = 1;
     char video_found[288];
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) selftest = 1;
@@ -1010,6 +1336,19 @@ int main(int argc, char **argv) {
             }
         }
         else if (!strcmp(argv[i], "--link-khz")) link_khz = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--clip")) clip_path = argv[++i];
+        else if (!strcmp(argv[i], "--size")) {
+            char tail;
+            if (sscanf(argv[++i], "%ux%u%c", &clip_w, &clip_h, &tail) != 2) {
+                fprintf(stderr, "bridge: --size wants the clip's WxH\n");
+                return 1;
+            }
+        }
+        else if (!strcmp(argv[i], "--bits")) clip_bits = atoi(argv[++i]);
+        /* the clip's link line, in link clocks: at least its width */
+        else if (!strcmp(argv[i], "--line-clocks"))
+            line_clocks = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--repeat")) repeat = atoi(argv[++i]);
         /* The sensor's frame length, in its own lines: a setting OF THE
          * SENSOR -- its vertical blanking -- which the link then follows
          * like any other part of its timing. 0: the mode's own. */
@@ -1063,6 +1402,16 @@ int main(int argc, char **argv) {
      * byte-for-byte against the Python reference, so anything printed
      * ahead of it is a failure of `make check`. The selftest needs no
      * device -- it proves the header layout, not the hardware. */
+    if (clip_path) {
+        int row = format_row(want_order ? want_order : "GBRG", (int)clip_bits);
+        if (row < 0 || !clip_w || !clip_h) {
+            fprintf(stderr, "bridge: a clip needs --size WxH and a mosaic "
+                    "order and depth bayerlink names (--order, --bits)\n");
+            return 1;
+        }
+        return run_clip(clip_path, clip_w, clip_h, row, line_clocks,
+                        frame_lines, repeat, link_khz, seconds);
+    }
     if (!video) {
         if (resolve_capture_node(video_found, sizeof video_found)) {
             fprintf(stderr, "bridge: no CSI-2 receiver node found by name "
@@ -1138,82 +1487,10 @@ int main(int argc, char **argv) {
     }
 
     /* --- display ------------------------------------------------- */
-    int dfd = open("/dev/dri/card1", O_RDWR);
-    if (dfd < 0) dfd = open("/dev/dri/card0", O_RDWR);
-    if (dfd < 0) die("open dri");
-    drmSetClientCap(dfd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
-
-    /* The sink may not be there YET. At power-on the board downstream
-     * boots and loads its bitstream a minute or two after this Pi, and
-     * until it does there is no HDMI sink to drive. Refusing at once
-     * left the unit to burn its restart budget in seconds and end
-     * `failed` with the board seconds from ready. So a missing display
-     * is waited for -- BOUNDED, because one that never comes is the
-     * refusal it always was, and the unit must still end `failed`
-     * rather than wait forever. While it waits the bridge is running
-     * and owns the camera, which is the truth. */
-    enum { DISPLAY_WAIT_S = 300, DISPLAY_REPORT_S = 30 };
+    int dfd = -1, crtc_index = 0;
     uint32_t connector_id = 0, crtc_id = 0;
-    int crtc_index = 0;
-    for (int waited = 0;; waited++) {
-        drmModeResPtr res = drmModeGetResources(dfd);
-        if (!res) die("GetResources");
-        for (int i = 0; i < res->count_connectors && !connector_id; i++) {
-            drmModeConnectorPtr c =
-                drmModeGetConnector(dfd, res->connectors[i]);
-            if (c && c->connection == DRM_MODE_CONNECTED) {
-                connector_id = c->connector_id;
-                /* The CRTC comes from the connector's ENCODERS' mask --
-                 * never from a guess. An all-ones fallback once picked
-                 * CRTC 0, which on vc4 is txp, the writeback engine: a
-                 * perfectly real CRTC that can never drive HDMI, and an
-                 * EINVAL that names no names. The encoder knows which
-                 * CRTCs can reach the wire; ask it. */
-                uint32_t possible = 0;
-                for (int j = 0; j < c->count_encoders; j++) {
-                    drmModeEncoderPtr e =
-                        drmModeGetEncoder(dfd, c->encoders[j]);
-                    if (!e) continue;
-                    if (e->crtc_id && !crtc_id) crtc_id = e->crtc_id;
-                    possible |= e->possible_crtcs;
-                    drmModeFreeEncoder(e);
-                }
-                for (int k = 0; k < res->count_crtcs; k++)
-                    if (crtc_id ? res->crtcs[k] == crtc_id
-                                : (possible & (1u << k))) {
-                        crtc_id = res->crtcs[k]; crtc_index = k; break;
-                    }
-            }
-            drmModeFreeConnector(c);
-        }
-        drmModeFreeResources(res);
-        if (connector_id && crtc_id) break;
-        connector_id = crtc_id = 0;
-        crtc_index = 0;
-        if (waited >= DISPLAY_WAIT_S) {
-            fprintf(stderr, "no connected connector/CRTC after %d s\n",
-                    DISPLAY_WAIT_S);
-            return 1;
-        }
-        if (waited % DISPLAY_REPORT_S == 0)
-            printf("bridge: no display connected yet -- waiting for the "
-                   "sink (%d s of %d)\n", waited, DISPLAY_WAIT_S);
-        sleep(1);
-    }
-    force_full_range(dfd, connector_id);
-
-    /* The link's clock is the far end's: its receiver is built for one,
-     * and it says which in its EDID -- the first detailed timing, the
-     * container it prefers. --link-khz overrides; a sink that states
-     * none gets the 1080p30 family's 74.25 MHz. */
-    if (!link_khz) {
-        uint8_t *e = NULL;
-        link_read_state(&e);
-        uint32_t clk = e ? (uint32_t)(e[54] | e[55] << 8) * 10u : 0;
-        link_khz = clk ? clk : 74250;
-        printf("bridge: link at %u kHz, %s\n", link_khz,
-               clk ? "as the sink's EDID prefers" : "the sink stating none");
-    }
+    if (open_display(&dfd, &connector_id, &crtc_id, &crtc_index)) return 1;
+    if (!link_khz) link_khz = sink_link_khz();
 
     /* The link raster, from the sensor's own timing in this mode: its
      * pixel rate and the blanking its driver states as the mode's -- its

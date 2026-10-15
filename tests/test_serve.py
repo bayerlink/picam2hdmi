@@ -534,9 +534,14 @@ def test_the_tv_raster_runs_on_the_links_line_and_frame_times():
     # a crop smaller than the frame changes the picture, not the raster
     assert display_raster(320, 240, 74250, 2358, 506)["h_active"] == 720
     # a TV clock twice the link's: the same times, twice the pixels in a
-    # line -- the area is still bounded by the frame's 506 lines
-    fast = display_raster(640, 480, 74250, 2358, 506, tv_khz=148500)
+    # line, for a display that counts that far -- the area still bounded by
+    # the frame's 506 lines; this display does not, and says so
+    fast = display_raster(640, 480, 74250, 2358, 506, tv_khz=148500,
+                          counters=(13, 11))
     assert fast["h_total"] == 4716 and fast["v_total"] == 506
+    import pytest
+    with pytest.raises(ValueError, match="past the display's counters"):
+        display_raster(640, 480, 74250, 2358, 506, tv_khz=148500)
     assert fast["v_active"] <= 506 - 6
     for r in (vga, fast):
         assert r["h_active"] < r["hs_beg"] < r["hs_end"] < r["h_total"]
@@ -694,3 +699,101 @@ def test_a_mode_no_raster_can_take_runs_at_its_own_timing():
             "bayer_phase": 2, "pixel_rate_hz": 58333000,
             "line_length_pck": 1852, "frame_length_lines": 4000}
     assert sensor_timing(slow, CLOCKS, 74250, 2) is None
+
+
+def test_an_image_is_timed_like_a_mode_onto_a_raster_the_tv_knows():
+    """A 1920x1080 image on a 148.5 MHz link lands on 1080p60 exactly --
+    its line 2200 link clocks, its frame 1125 lines."""
+    from picam2hdmi.serve import clip_timing
+    t = clip_timing(1920, 1080, CLOCKS, 148500, 142857)
+    assert t["raster"] == "1920x1080p60"
+    assert (t["line_clocks"] + (t["line_clocks"] & 1), t["frame_lines"]) \
+        == (2200, 1125)
+
+
+def test_an_image_runs_at_the_rate_asked_by_its_frame_length():
+    """The rate asked is the link's own -- one image frame a link frame,
+    no repeats, so the ISP sees it -- and on the image's own line a new
+    rate is a new frame length and nothing else."""
+    from picam2hdmi.serve import clip_timing
+    base = clip_timing(1920, 1080, CLOCKS, 148500, 142857)
+    t = clip_timing(1920, 1080, CLOCKS, 148500, 142857, fps=37)
+    assert t["repeat"] == 1 and abs(t["hz"] - 37) < 0.05
+    assert t["line_clocks"] == base["line_clocks"]
+    assert t["frame_lines"] != base["frame_lines"]
+
+
+def test_a_rate_past_the_displays_counters_moves_the_line():
+    """5 fps on 1080p60's line is a frame of 13500 lines, past an 11-bit
+    line counter: the line lengthens instead, the frame stays inside, and
+    the display's line stays inside its 12-bit pixel counter -- at the
+    slowest clock the board makes, where none faster holds it."""
+    from picam2hdmi.serve import clip_timing, display_clock
+    t = clip_timing(1920, 1080, CLOCKS, 148500, 142857, fps=5,
+                    counters=(12, 11))
+    assert abs(t["hz"] - 5) < 0.01 and t["frame_lines"] < 2048
+    ht = t["line_clocks"] + (t["line_clocks"] & 1)
+    clk = display_clock(CLOCKS, 1920, 1080, 148500, ht)
+    assert ht * clk / 148500 < 4096
+
+
+def test_a_rate_the_link_cannot_carry_says_its_range():
+    import pytest
+    from picam2hdmi.serve import clip_timing
+    with pytest.raises(ValueError, match=r"3\.2 to 68\.3 fps"):
+        clip_timing(1920, 1080, CLOCKS, 148500, 142857, fps=1)
+
+
+def test_an_image_line_is_never_shorter_than_the_isp_drains_it():
+    """The ISP takes a sample a cycle at its own clock: a full 2592-wide
+    line on a 148.5 MHz link needs more link clocks than samples when the
+    ISP runs at 142.857 MHz, or the receiver's buffer overflows."""
+    import math
+    from picam2hdmi.serve import clip_timing
+    t = clip_timing(2592, 1944, CLOCKS, 148500, 142857)
+    assert t["line_clocks"] >= math.ceil(2592 * 148500 / 142857)
+    assert t["line_clocks"] * 142857 / 148500 >= 2592
+
+
+def test_an_image_is_packed_as_bayerlink_unpacks_it(tmp_path, monkeypatch):
+    """Each frame of a raw image goes into the clip in bayerlink's own
+    packing, frame after frame; samples outside the depth are refused."""
+    import numpy as np
+    from bayerlink.protocol import unpack_samples
+    from picam2hdmi import serve
+    clip = tmp_path / "clip.raw"
+    monkeypatch.setattr(serve, "IMAGE_CLIP", str(clip))
+    rng = np.random.default_rng(3)
+    frames = rng.integers(0, 1024, (2, 6, 16)).astype(np.uint16)
+    np.save(tmp_path / "img.npy", frames)
+    assert serve.prepare_image(tmp_path / "img.npy", 10) == (2, 6, 16)
+    raw = np.frombuffer(clip.read_bytes(), np.uint8).reshape(2, 6, 20)
+    for k in range(2):
+        np.testing.assert_array_equal(unpack_samples(raw[k], 10), frames[k])
+    np.save(tmp_path / "hot.npy", frames + 1024)
+    import pytest
+    with pytest.raises(ValueError, match="outside 10 bits"):
+        serve.prepare_image(tmp_path / "hot.npy", 10)
+
+
+def test_the_spool_says_which_files_are_images(tmp_path):
+    """A container recording and a raw Bayer image are told apart by their
+    arrays, so the panel lists each where it plays."""
+    import numpy as np
+    from picam2hdmi.serve import spool_kind
+    np.save(tmp_path / "rec.npy", np.zeros((2, 5, 16, 3), np.uint8))
+    np.save(tmp_path / "still.npy", np.zeros((4, 8), np.uint16))
+    np.save(tmp_path / "clip.npy", np.zeros((3, 4, 8), np.uint16))
+    np.save(tmp_path / "rgb.npy", np.zeros((4, 8, 3), np.float32))
+    assert {n: spool_kind(tmp_path / f"{n}.npy")
+            for n in ("rec", "still", "clip", "rgb")} == {
+        "rec": "recording", "still": "image", "clip": "image",
+        "rgb": "unknown"}
+
+
+def test_a_display_raster_stays_inside_the_displays_counters():
+    """The display's frame follows the link's to within a line, never past
+    what its counters reach: a 2047-line link frame is not met with 2048."""
+    from picam2hdmi.serve import display_raster
+    tv = display_raster(1920, 1080, 148500, 14510, 2047, 27000, (12, 11))
+    assert tv["v_total"] < 2048 and tv["h_total"] < 4096
