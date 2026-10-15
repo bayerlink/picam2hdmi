@@ -193,23 +193,57 @@ static struct bridge_mode BMODE;
  * chooses a frame rate: the sensor's line time and frame length are its
  * mode's, and the raster follows them. The line is rounded UP, and to an
  * even count, so the link line is never shorter than the sensor's; the
- * vertical-blanking trim of the line lock takes up the rest. The frame
+ * vertical-blanking trim of the line lock takes up the rest. A link line
+ * is as wide as the sensor's PACKED line, three bytes a link pixel -- the
+ * receiver reads that many bytes from each and ignores the rest -- and no
+ * narrower than the header's 48 bytes, at a stride unicam keeps: the
+ * sensor writes the scanned buffer directly, so the two strides are one
+ * (link_width asks unicam, it does not assume its alignment); it lasts at least the sensor's
+ * width in link clocks, since the receiver puts out one sample a clock
+ * (bayerlink's rate rule), and main stretches the sensor's line to
+ * that where its own is shorter. The frame
  * carries LOCK_SPARE lines past the sensor's own, so the lock can trim
  * the sensor's blanking either way: with the raster at the sensor's
  * minimum it could only slow it, and acquired by waiting out the drift.
  * The syncs sit in the blanking, which the sensor's minimum holds. */
 #define LOCK_SPARE 2
 static struct bridge_raster LINK = {.name = "sensor"};
-static int derive_raster(uint32_t w, uint32_t h, double pixel_rate,
-                         int hblank, int vblank, uint32_t link_khz) {
+#define HEADER_BYTES 48
+/* The link line's width in link pixels: an even count, three bytes each,
+ * holding the packed line, at the first such stride unicam keeps for a
+ * w x h frame of this pixel format. 0 where it keeps none nearby. */
+static uint32_t link_width(const char *video, uint32_t w, uint32_t h,
+                           int bits, uint32_t pixfmt) {
+    uint32_t bytes = w * (uint32_t)bits / 8u;
+    if (bytes < HEADER_BYTES) bytes = HEADER_BYTES;
+    int fd = open(video, O_RDWR | O_NONBLOCK);
+    if (fd < 0) return 0;
+    uint32_t cw = 0;
+    for (uint32_t p = (bytes + 5u) / 6u * 6u; p < bytes + 6u * 64u; p += 6u) {
+        struct v4l2_format f = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
+        f.fmt.pix.width = w; f.fmt.pix.height = h;
+        f.fmt.pix.pixelformat = pixfmt;
+        f.fmt.pix.field = V4L2_FIELD_NONE;
+        f.fmt.pix.bytesperline = p;
+        if (ioctl(fd, VIDIOC_TRY_FMT, &f) == 0 && f.fmt.pix.bytesperline == p) {
+            cw = p / 3u;
+            break;
+        }
+    }
+    close(fd);
+    return cw;
+}
+static int derive_raster(uint32_t w, uint32_t h, uint32_t cw,
+                         double pixel_rate, int hblank, int vblank,
+                         uint32_t link_khz) {
     double line_s = (w + hblank) / pixel_rate;
     uint32_t ht = (uint32_t)ceil(line_s * link_khz * 1000.0);
     ht += ht & 1u;
-    if (ht < w + 48 || vblank < 8) return -1;
+    if (!cw || ht < cw + 48 || ht < w || vblank < 8) return -1;
     LINK.pixel_khz = link_khz;
-    LINK.h_active = w;
-    LINK.hs_beg = w + 8;
-    LINK.hs_end = w + 40;
+    LINK.h_active = cw;
+    LINK.hs_beg = cw + 8;
+    LINK.hs_end = cw + 40;
     LINK.h_total = ht;
     LINK.v_active = h;
     LINK.vs_beg = h + 2;
@@ -529,11 +563,11 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
              * replacing it with this bridge's own header would hand
              * the receiver the live sensor's facts about somebody
              * else's picture. */
-            size_t frame = (size_t)WIDTH * VDISP * 3;
+            size_t frame = (size_t)LINK.h_active * VDISP * 3;
             if ((size_t)st.st_size < frame) {
                 snprintf(reply, cap, "err %s: %lld bytes is less than one "
                          "%ux%u container", path, (long long)st.st_size,
-                         WIDTH, VDISP);
+                         LINK.h_active, VDISP);
                 close(fd);
                 return;
             }
@@ -573,17 +607,17 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
             snprintf(reply, cap, "err %s: %s", cpath, strerror(errno));
             return;
         }
-        int ok = fwrite(base_map_ro, 1, (size_t)WIDTH * 3, f) ==
-                 (size_t)WIDTH * 3;
+        size_t row = (size_t)LINK.h_active * 3;
+        int ok = fwrite(base_map_ro, 1, row, f) == row;
         for (uint32_t r = 0; ok && r < HEIGHT; r++)
             ok = fwrite(bstate.payload_map + (size_t)r * bstate.payload_pitch,
-                        1, (size_t)WIDTH * 3, f) == (size_t)WIDTH * 3;
+                        1, row, f) == row;
         fclose(f);
         if (!ok) {
             snprintf(reply, cap, "err %s: short write", cpath);
             return;
         }
-        snprintf(reply, cap, "ok %s %u %u %s", cpath, WIDTH, VDISP,
+        snprintf(reply, cap, "ok %s %u %u %s", cpath, LINK.h_active, VDISP,
                  paused ? "steady" : "live");
         return;
     }
@@ -952,7 +986,7 @@ int main(int argc, char **argv) {
      * start-up already does correctly. The frame need only fit the
      * raster -- it sits inside it, and the header tells the receiver
      * the truth. */
-    unsigned want_w = 0, want_h = 0, link_khz = 74250, frame_lines = 0;
+    unsigned want_w = 0, want_h = 0, link_khz = 0, frame_lines = 0;
     unsigned line_ns = 0;
     const char *want_order = NULL;
     int test_pattern = 0, selftest = 0;
@@ -1103,54 +1137,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* The link raster, from the sensor's own timing in this mode: its
-     * pixel rate and the blanking its driver states as the mode's -- its
-     * defaults, never the values in force, which are whatever the last
-     * run left (reading those, each restart lengthened the line by the
-     * rounding of the one before). */
-    {
-        int32_t hb = 0, vb = 0;
-        double pr = (double)get_pixel_rate(sfd);
-        if (ctrl_default(sfd, V4L2_CID_HBLANK, &hb) < 0 ||
-            ctrl_default(sfd, V4L2_CID_VBLANK, &vb) < 0 || pr <= 0) {
-            fprintf(stderr, "bridge: the sensor does not state its pixel "
-                    "rate and blanking, so its line cannot be carried\n");
-            return 1;
-        }
-        if (line_ns) {
-            /* the longest sensor line that does not exceed the time asked:
-             * the link's line, rounded up from it, then lands on it */
-            int asked = (int)(line_ns * 1e-9 * pr) - (int)WIDTH;
-            if (asked < hb) {
-                fprintf(stderr, "bridge: %u ns is shorter than the sensor's "
-                        "shortest %ux%u line\n", line_ns, WIDTH, HEIGHT);
-                return 1;
-            }
-            hb = asked;
-        }
-        if (frame_lines) {
-            int asked = (int)frame_lines - (int)HEIGHT - LOCK_SPARE;
-            if (asked < vb) {
-                fprintf(stderr, "bridge: %u lines is shorter than the "
-                        "sensor's shortest %ux%u frame (%u lines)\n",
-                        frame_lines, WIDTH, HEIGHT,
-                        HEIGHT + (unsigned)vb + LOCK_SPARE);
-                return 1;
-            }
-            vb = asked;
-        }
-        if (derive_raster(WIDTH, HEIGHT, pr, hb, vb, link_khz) < 0) {
-            fprintf(stderr, "bridge: a %ux%u frame with %d+%d blanking "
-                    "does not fit a link at %u kHz\n", WIDTH, HEIGHT, hb,
-                    vb, link_khz);
-            return 1;
-        }
-        set_raster(&LINK);
-        printf("bridge: link raster %ux%u of %ux%u at %u kHz, %u Hz -- "
-               "the sensor's\n", LINK.h_active, LINK.v_active, LINK.h_total,
-               LINK.v_total, link_khz, LINK.hz);
-    }
-
     /* --- display ------------------------------------------------- */
     int dfd = open("/dev/dri/card1", O_RDWR);
     if (dfd < 0) dfd = open("/dev/dri/card0", O_RDWR);
@@ -1216,20 +1202,101 @@ int main(int argc, char **argv) {
     }
     force_full_range(dfd, connector_id);
 
-    struct dumb base = make_fb(dfd, WIDTH, VDISP);
-    struct dumb pay = make_fb(dfd, WIDTH, HEIGHT);
+    /* The link's clock is the far end's: its receiver is built for one,
+     * and it says which in its EDID -- the first detailed timing, the
+     * container it prefers. --link-khz overrides; a sink that states
+     * none gets the 1080p30 family's 74.25 MHz. */
+    if (!link_khz) {
+        uint8_t *e = NULL;
+        link_read_state(&e);
+        uint32_t clk = e ? (uint32_t)(e[54] | e[55] << 8) * 10u : 0;
+        link_khz = clk ? clk : 74250;
+        printf("bridge: link at %u kHz, %s\n", link_khz,
+               clk ? "as the sink's EDID prefers" : "the sink stating none");
+    }
+
+    /* The link raster, from the sensor's own timing in this mode: its
+     * pixel rate and the blanking its driver states as the mode's -- its
+     * defaults, never the values in force, which are whatever the last
+     * run left (reading those, each restart lengthened the line by the
+     * rounding of the one before). */
+    {
+        int32_t hb = 0, vb = 0;
+        double pr = (double)get_pixel_rate(sfd);
+        if (ctrl_default(sfd, V4L2_CID_HBLANK, &hb) < 0 ||
+            ctrl_default(sfd, V4L2_CID_VBLANK, &vb) < 0 || pr <= 0) {
+            fprintf(stderr, "bridge: the sensor does not state its pixel "
+                    "rate and blanking, so its line cannot be carried\n");
+            return 1;
+        }
+        if (line_ns) {
+            /* the longest sensor line that does not exceed the time asked:
+             * the link's line, rounded up from it, then lands on it */
+            int asked = (int)(line_ns * 1e-9 * pr) - (int)WIDTH;
+            if (asked < hb) {
+                fprintf(stderr, "bridge: %u ns is shorter than the sensor's "
+                        "shortest %ux%u line\n", line_ns, WIDTH, HEIGHT);
+                return 1;
+            }
+            hb = asked;
+        }
+        if (frame_lines) {
+            int asked = (int)frame_lines - (int)HEIGHT - LOCK_SPARE;
+            if (asked < vb) {
+                fprintf(stderr, "bridge: %u lines is shorter than the "
+                        "sensor's shortest %ux%u frame (%u lines)\n",
+                        frame_lines, WIDTH, HEIGHT,
+                        HEIGHT + (unsigned)vb + LOCK_SPARE);
+                return 1;
+            }
+            vb = asked;
+        }
+        /* the receiver's rate: a line of WIDTH samples lasts at least
+         * WIDTH link clocks, or its output falls behind the link */
+        int rate_hb = (int)ceil(WIDTH * pr / (link_khz * 1000.0)) - (int)WIDTH;
+        if (hb < rate_hb) {
+            printf("bridge: the sensor's %ux%u line is stretched to %u "
+                   "pixels, the %u link clocks its samples take\n", WIDTH,
+                   HEIGHT, WIDTH + (unsigned)rate_hb, WIDTH);
+            hb = rate_hb;
+        }
+        uint32_t cw = link_width(video, WIDTH, HEIGHT, FORMATS[fmt_row].bits,
+                                 FORMATS[fmt_row].v4l2);
+        if (!cw) {
+            fprintf(stderr, "bridge: unicam keeps no stride near a packed "
+                    "%u-sample line\n", WIDTH);
+            return 1;
+        }
+        if (derive_raster(WIDTH, HEIGHT, cw, pr, hb, vb, link_khz) < 0) {
+            fprintf(stderr, "bridge: a %ux%u frame with %d+%d blanking "
+                    "does not fit a link at %u kHz\n", WIDTH, HEIGHT, hb,
+                    vb, link_khz);
+            return 1;
+        }
+        set_raster(&LINK);
+        printf("bridge: link raster %ux%u of %ux%u at %u kHz, %u Hz -- "
+               "the sensor's\n", LINK.h_active, LINK.v_active, LINK.h_total,
+               LINK.v_total, link_khz, LINK.hz);
+    }
+
+
+
+    /* the container: link lines as wide as a packed sensor line */
+    const uint32_t CW = LINK.h_active;
+    struct dumb base = make_fb(dfd, CW, VDISP);
+    struct dumb pay = make_fb(dfd, CW, HEIGHT);
     if (drmModeSetCrtc(dfd, crtc_id, base.fb_id, 0, 0, &connector_id, 1,
                        &MODE))
         die("SetCrtc");
     uint32_t plane = overlay_plane(dfd, crtc_index);
     if (drmModeSetPlane(dfd, plane, crtc_id, pay.fb_id, 0,
-                        0, 1, WIDTH, HEIGHT,
-                        0, 0, WIDTH << 16, HEIGHT << 16))
+                        0, 1, CW, HEIGHT,
+                        0, 0, CW << 16, HEIGHT << 16))
         die("SetPlane");
     /* Somewhere for the sensor to write while the display holds still.
      * Same geometry, never scanned out -- so the only cost of pause is
      * one buffer, and the picture never learns about it. */
-    struct dumb scratch = make_fb(dfd, WIDTH, HEIGHT);
+    struct dumb scratch = make_fb(dfd, CW, HEIGHT);
     scratch_map = scratch.map;
     scratch_pitch = scratch.pitch;
     if (drmPrimeHandleToFD(dfd, scratch.handle, DRM_CLOEXEC | DRM_RDWR,
@@ -1433,10 +1500,10 @@ int main(int argc, char **argv) {
          * after the queue had drained. */
         if (clip_map && (clip_frames > 1 || clip_drawn < CAPTURE_BUFS)) {
             const uint8_t *src = clip_map + clip_at * clip_frame_bytes;
-            memcpy(base.map, src, WIDTH * 3);          /* the recorded header */
+            memcpy(base.map, src, CW * 3);             /* the recorded header */
             for (uint32_t r = 0; r < HEIGHT; r++)
                 memcpy(pay.map + (size_t)r * pay.pitch,
-                       src + (size_t)(r + 1) * WIDTH * 3, WIDTH * 3);
+                       src + (size_t)(r + 1) * CW * 3, CW * 3);
             clip_at = (clip_at + 1) % clip_frames;
             /* Clamped: a moving clip redraws every frame anyway, and an
              * unbounded counter would be the only thing here that could

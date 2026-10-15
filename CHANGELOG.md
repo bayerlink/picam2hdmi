@@ -13,8 +13,10 @@ moves is named here.
 
 - **The link carries the sensor as it is.** The link raster is derived
   from the sensor's own timing in its mode -- one sensor line a link line,
-  one frame a frame, at the link's clock (`--link-khz`, 74250 by default:
-  what the receiver is built for) -- so no frame rate is chosen anywhere;
+  one frame a frame, at the link's clock -- the far end's, read from the
+  first detailed timing of the sink's EDID, since its receiver is built for
+  one (`--link-khz` overrides; 74250 where the sink states none) -- so no
+  frame rate is chosen anywhere;
   the bridge's own copy of the 1080p30 modeline is gone. `--mode WxH` sets
   the sensor's size and nothing else, and with no mode the bridge takes
   the sensor's current one rather than assuming 1920x1080. Every link edge
@@ -28,6 +30,16 @@ moves is named here.
   long as the sensor's, the 3A settings -- and the keeper does the same
   once per bridge run, so a module installed, a reboot or a restart does
   not leave it waiting. `/status` carries its answer.
+- **A link line is as wide as the sensor's packed line**, three bytes a
+  link pixel, at the first stride unicam keeps (asked with `TRY_FMT`, not
+  assumed): 800 link pixels carry a 1920-sample 10-bit line, where 1920
+  did. A sensor line shorter than its width in link clocks -- bayerlink's
+  rate rule for a one-sample-a-clock receiver -- is stretched to it, so
+  the full 2592x1944 array streams at about 15 fps on a 74.25 MHz link.
+  The panel plans no timing a link line cannot carry, and sizes the
+  display for what the ISP's crop keeps of a frame bigger than any TV
+  area, not for the frame. A recording made at the old width does not
+  play.
 - **No line budget in the panel.** The link's line is the sensor's, so the
   fixed 2200-slot budget the panel enforced is gone.
 

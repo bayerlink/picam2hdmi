@@ -659,6 +659,33 @@ def test_each_mode_is_timed_onto_a_raster_the_tv_knows():
         assert abs(link_frame - tv_frame) / tv_frame <= GENLOCK_EASE
 
 
+def test_a_line_the_link_cannot_carry_is_never_planned():
+    """A sensor fast enough for 1080p60 is not put on it over a 74.25 MHz
+    link: 1080p60's line is 1100 link clocks, and 1920 samples need 1920.
+    It lands on the fastest raster whose line carries them."""
+    from picam2hdmi.serve import sensor_timing
+    fast = {"name": "x", "width": 1920, "height": 1080, "bits": 10,
+            "bayer_phase": 2, "pixel_rate_hz": 175000000,
+            "line_length_pck": 2100, "frame_length_lines": 1100}
+    timing = sensor_timing(fast, CLOCKS, 74250, 2)
+    assert timing["raster"] == "1920x1080p30"
+    _, ht, _ = _link(fast, timing)
+    assert ht >= fast["width"]
+
+
+def test_a_frame_bigger_than_any_tv_area_is_shown_by_its_crop():
+    """The full 2592x1944 array: its link line, stretched to the 2594 clocks
+    its samples take, goes out at 74.25 MHz with the largest TV area
+    active -- the ISP's crop keeps that much -- not at a clock whose raster
+    would have to hold the whole frame."""
+    from picam2hdmi.serve import display_clock, display_raster
+    clock = display_clock(CLOCKS, 2592, 1944, 74250, 2594)
+    tv = display_raster(2592, 1944, 74250, 2594, 1970, clock)
+    assert clock == 74250
+    assert (tv["h_active"], tv["v_active"]) == (1920, 1080)
+    assert (tv["h_total"], tv["v_total"]) == (2594, 1970)
+
+
 def test_a_mode_no_raster_can_take_runs_at_its_own_timing():
     """A mode whose shortest frame is longer than every raster that holds
     it gets no timing: nothing is forced."""

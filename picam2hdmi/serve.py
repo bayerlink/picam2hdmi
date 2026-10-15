@@ -681,6 +681,15 @@ TV_AREAS = ((1920, 1080), (1280, 1024), (1280, 720), (1024, 768),
 H_BLANK_MIN, V_BLANK_MIN = 64, 6
 
 
+def shown(width: int, height: int) -> tuple:
+    """What a display shows of a `width` x `height` frame: all of it, or of
+    a frame bigger than any TV area, the largest area -- the ISP's crop
+    keeps that much of its middle, and everything after it is sized by
+    what it keeps."""
+    big_w, big_h = max(TV_AREAS)
+    return min(width, big_w), min(height, big_h)
+
+
 # How far apart a link frame and the raster frame following it may be:
 # the genlock pulls the raster by one fine-phase step (about 26 ps at a
 # 27 MHz display clock) a handshake, some 50 ppm at most, and an error it
@@ -724,14 +733,19 @@ def sensor_timing(mode: dict, clocks, link_khz: int,
     display_clock picks its clock and standard_raster recognises the link
     -- so what is planned here and what is applied are one rule. Of those:
     the smallest that holds the picture, then the fastest the sensor
-    reaches."""
+    reaches. A link line carries the sensor's line only if it lasts as many
+    link clocks as the line has samples (bayerlink's rate rule): where it
+    is shorter the bridge stretches the sensor's line, which no raster
+    planned on the shorter one survives, so such a line is no candidate."""
     import math
+    from bayerlink import fits_line_rate
     from bayerlink.rasters import RASTERS
     w, h, pr = mode["width"], mode["height"], mode["pixel_rate_hz"]
     line_min, frame_min = mode["line_length_pck"], mode["frame_length_lines"]
+    sw, sh = shown(w, h)
     best = None
     for name, r in RASTERS.items():
-        if (r.pixel_khz not in clocks or w > r.h_active or h > r.v_active):
+        if (r.pixel_khz not in clocks or sw > r.h_active or sh > r.v_active):
             continue
         tv_line = r.h_total / (r.pixel_khz * 1e3)
         frame_s = tv_line * r.v_total
@@ -741,6 +755,8 @@ def sensor_timing(mode: dict, clocks, link_khz: int,
         for line in range(max(line_min, near - reach), near + reach + 1):
             ht = math.ceil(line / pr * link_khz * 1000.0)
             ht += ht & 1
+            if not fits_line_rate(w, ht):
+                continue
             link_line = ht / (link_khz * 1e3)
             drift = abs(link_line - tv_line) * h / link_line
             frame = round(frame_s / link_line)
@@ -756,7 +772,7 @@ def sensor_timing(mode: dict, clocks, link_khz: int,
         while int(ns * 1e-9 * pr) < line:   # as the bridge reads it back
             ns += 1
         if (display_clock(clocks, w, h, link_khz, ht) != r.pixel_khz
-                or standard_raster(w, h, link_khz, ht, frame,
+                or standard_raster(sw, sh, link_khz, ht, frame,
                                    r.pixel_khz) is not r):
             continue
         key = (r.h_active * r.v_active, -r.pixel_khz * 1e3 /
@@ -775,7 +791,9 @@ def display_raster(width: int, height: int, link_khz: int, h_total: int,
     picture's lines go out exactly as fast as they come in and nothing is
     stored -- and its active area the largest familiar one those totals
     leave room for, at least the picture. No rate is asked for or stated:
-    the TV decides whether it takes it."""
+    the TV decides whether it takes it. The picture is what the display
+    shows of the frame (`shown`)."""
+    width, height = shown(width, height)
     r = standard_raster(width, height, link_khz, h_total, v_total, tv_khz)
     if r is not None:
         return {f: int(getattr(r, f)) for f in (
@@ -818,6 +836,7 @@ def display_clock(clocks, width: int, height: int, link_khz: int = 0,
     -- still holds the TV area's width and its blanking, so a frame rate
     the slower clock cannot carry is carried by a faster one. The
     knowledge is this daemon's, not the firmware's."""
+    width, height = shown(width, height)
     clocks = sorted(int(c) for c in clocks)
     if height <= 480 and 27000 in clocks:
         return 27000
