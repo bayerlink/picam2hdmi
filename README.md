@@ -18,6 +18,50 @@ No transcoding, no compression, no per-sensor code in this tool: the Bayer
 order and bit depth travel in the stream itself, so a receiver built once
 works with every camera the Pi supports.
 
+## Why
+
+Built as the sensor front end for FPGA image pipelines -- for example, as
+the input to hardware generated with [np2hw](https://github.com/lanserge/np2hw)
+-- and useful to anyone who wants real sensor data into a board without
+MIPI hardware, deserialisers, or per-sensor bring-up.
+
+**Camera connectors are what make FPGA boards expensive.** A board with a
+MIPI CSI-2 camera input sits well above the entry level; the inexpensive
+boards that are good enough for real image processing leave the camera
+connector off, and keep an HDMI input. picam2hdmi puts the camera on the
+port those boards already have.
+
+**The Pi is where the sensors are.** Its camera ecosystem is the widest
+there is -- the official modules, and a long list of third-party ones
+built for the same connector and cable -- and that cable has become a
+de-facto standard: other boards, NVIDIA's Jetson developer kits among
+them, adopted it. A sensor someone wants to try almost certainly exists
+for the Pi first.
+
+**Over the bridge the sensor is all but native.** `picam2hdmi bridge`
+does not capture frames and send them on: it puts the sensor's lines on
+the wire as the sensor delivers them, the HDMI output phase-locked to the
+sensor itself. What arrives at the far end is a few lines behind the
+sensor -- under a millisecond -- so whatever consumes the frames over HDMI
+is always working on the frame the sensor is producing, never one stored
+and replayed.
+
+**The Pi runs the sensor, so the FPGA only processes images.** Choosing a
+mode, writing the sensor's registers, exposure and gain, and the firmware
+that configures the processing on the far end all live on the Pi, over the
+HDMI cable's own control channel. The FPGA receives pixels and processes
+them: no sensor driver, no I2C to the camera, no processor needed for the
+camera's sake.
+
+**It is a test source as much as a camera.** Raw Bayer frames saved as
+`.npy` -- captured from a sensor, generated as patterns, or made by any
+script -- play through the same bridge with no camera running, at any
+frame rate asked for. The rate is the link's own, one frame per link
+frame, so the image processing on the far end sees exactly that rate:
+the same frames at 5, 30 or 60 fps, repeatable down to the bit. Changing
+the rate changes only the frame's length where it can, so it applies on
+the running link.
+
 ## The protocol: bayerlink
 
 The wire format is **[bayerlink](https://github.com/bayerlink/bayerlink)** —
@@ -48,6 +92,7 @@ print(header.bayer_order, header.width, header.height, header.frame_seq)
 | ToF raw phases | **working** — `stream --source tof`: an Arducam ToF camera's four phase planes, one bayerlink frame each, the phase in `frame_seq % 4` |
 | Instrument mode | **working** — `picam2hdmi serve`: HTTP control, recordings spool, a control panel and a power button; the last source is restored at boot (`contrib/picam2hdmi.service`). On a bridge bench the panel offers what the bridge can act on and nothing else — geometry, exposure and gain all belong elsewhere |
 | Genlocked bridge | **working** — `picam2hdmi bridge`: the C daemon, sensor lines onto the wire in lines, output phase-locked to the sensor so latency is lines and no frame is shown twice or dropped (`contrib/bridge.service`) |
+| Test frames | **working** — raw Bayer `.npy` images in the panel's spool, one frame or many, played by the bridge with no sensor at the frame rate asked for: the link and the far end run at exactly that rate, a new rate on the same line applied live as a new frame length |
 | Module slots | **working** — C packages uploaded from the panel and compiled into the bridge: `isp` (policy: the bridge hooks and the far end's registers), `sensor` (a driver), `algo` (pure computation) |
 
 ## Usage
@@ -71,6 +116,39 @@ pattern file plays as a proper continuous stream:
 picam2hdmi pattern --mode checker --width 512 --height 240 --out checker_512x240.npy
 # then drag it into the panel at http://<pi>:8080/
 ```
+
+### Testing with frames
+
+Any raw Bayer frames make a test stream: a NumPy array of samples, one
+frame `(H, W)` or several `(N, H, W)`, saved as `.npy` -- a capture, a
+synthetic chart, a sequence a script rendered:
+
+```python
+import numpy as np
+from bayerlink import pattern
+
+np.save("counting_512x240.npy", pattern.counting(512, 240))   # 12-bit samples
+```
+
+Drop the file onto the panel (or `PUT /recordings/<name>.npy`) and it is
+listed under **images**. Choosing one plays it through the bridge with no
+camera running -- the frames packed by bayerlink's own rule, the header
+written as for the sensor -- and the **fps** field sets the rate: the
+link runs at exactly that rate, one image frame per link frame, so the
+far end processes exactly that rate. A new rate is applied on the running
+link where only the frame's length changes; a rate the link and the
+display cannot carry is refused, with the range they can. The same, from
+a script:
+
+```bash
+curl -X PUT http://<pi>:8080/source -d \
+  '{"source": "image", "file": "counting_512x240.npy", "fps": 30, "bits": 12}'
+```
+
+`bits` is the samples' depth (10 by default) and `order` their mosaic
+(`GBRG` by default). There is no floor on the rate: the display follows
+the link, and a TV that cannot follow a rate shows no signal, which is
+what it is.
 
 On a Pi, **[SETUP.md](SETUP.md)** is the step-by-step from blank SD card to
 streaming instrument (or `contrib/install.sh` does the install in one go).
@@ -127,13 +205,6 @@ rate rule are in the [bayerlink spec](https://github.com/bayerlink/bayerlink). T
 exact too: the bridge genlocks the HDMI output to the sensor so every
 captured frame leaves the cable exactly once — why and how in
 [GENLOCK.md](GENLOCK.md).
-
-## Why this exists
-
-Built as the sensor front-end for FPGA image pipelines — for example, as the
-input to hardware generated with [np2hw](https://github.com/lanserge/np2hw)
-— but useful to anyone who wants real sensor data into a board without
-MIPI hardware, deserialisers, or per-sensor bring-up.
 
 ## Funding
 
