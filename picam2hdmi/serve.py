@@ -431,7 +431,7 @@ class Supervisor:
         restarted all leave it waiting for an init. Tried once per run:
         a firmware that refuses says why in status, not every beat."""
         desired = self.stored_spec() or {}
-        if (desired.get("source") not in ("camera", "image")
+        if (desired.get("source") not in ("camera", "image", "file")
                 or not _bridge_owns_bench()):
             return False
         try:
@@ -443,7 +443,8 @@ class Supervisor:
             return False                   # no firmware, or already up
         run = round(time.time() - float(status.get("uptime", 0)))
         aaa = ({"ae": 0, "awb": 0, "af": 0}
-               if desired.get("source") == "image" else desired.get("aaa"))
+               if desired.get("source") in ("image", "file")
+               else desired.get("aaa"))
         return self.firmware_now(aaa, run, once=True) is not None
 
     def firmware_now(self, aaa: dict | None = None, run: int | None = None,
@@ -974,7 +975,7 @@ def clip_timing(width: int, height: int, clocks, link_khz: int,
     the camera's 1080p30 carries a 1080 image at 30 fps, and planning
     another raster for it would change the mode on the cable, and on the
     TV, for nothing.
-    {"raster", "line_clocks", "frame_lines", "repeat", "hz"}; a rate the
+    {"raster", "line_clocks", "frame_lines", "hz"}; a rate the
     link cannot carry at all is refused."""
     import math
     line_min = width if not isp_khz else max(
@@ -1000,7 +1001,7 @@ def clip_timing(width: int, height: int, clocks, link_khz: int,
             if (abs(link_khz * 1e3 / (ht * vt) - fps) <= fps * 1e-9
                     and ht >= even(line_min) and fits(ht, vt)):
                 return {"raster": None, "line_clocks": ht, "frame_lines": vt,
-                        "repeat": 1, "hz": link_khz * 1e3 / (ht * vt)}
+                        "hz": link_khz * 1e3 / (ht * vt)}
         rate = lambda ht: round(link_khz * 1e3 / (ht * fps))
         if not fits(even(line), rate(even(line))):
             # the line the rate needs: long enough that the frame fits the
@@ -1021,7 +1022,7 @@ def clip_timing(width: int, height: int, clocks, link_khz: int,
         frame = rate(even(line))
     ht = even(math.ceil(line - 1e-6))
     return {"raster": planned["raster"] if planned and not fps else None,
-            "line_clocks": line, "frame_lines": frame, "repeat": 1,
+            "line_clocks": line, "frame_lines": frame,
             "hz": link_khz * 1e3 / (ht * frame)}
 
 
@@ -1105,7 +1106,7 @@ def image_plan(spec: dict, w: int, h: int, bridge: dict,
                     counters, wire)
     return (f"--clip {IMAGE_CLIP} --size {w}x{h} --bits {bits} "
             f"--order {order} --line-clocks {t['line_clocks']} "
-            f"--frame-lines {t['frame_lines']} --repeat {t['repeat']}")
+            f"--frame-lines {t['frame_lines']}")
 
 
 CAMERA_ENV = Path("/run/bridge.camera.env")
@@ -1273,9 +1274,12 @@ def route_to_bridge(spec: dict, spool: Path) -> str | None:
     if wanted not in ("camera", "file") or not _bridge_up():
         return None
     if wanted == "camera":
-        reply = _bridge_command("bridge source sensor")
-        if not reply.startswith("ok"):
-            raise ValueError(reply)
+        # a clip run has no sensor: the camera is a reconfiguration back,
+        # to the options it streamed with
+        if _bridge_plays_clip():
+            said = _bridge_reconfigure(_camera_args())
+            if not said.startswith("ok"):
+                raise ValueError(said)
         return "sensor"
     name = str(spec.get("file", ""))
     path = spool / name
@@ -1284,10 +1288,42 @@ def route_to_bridge(spec: dict, spool: Path) -> str | None:
     if not path.exists():
         raise ValueError(f"no recording {name!r}")
     info = _prepare_clip(path)
-    reply = _bridge_command(f"bridge source clip {CLIP_PATH}")
-    if not reply.startswith("ok"):
-        raise ValueError(reply)
+    _remember_camera()
+    said = _bridge_reconfigure(recording_args(info, _bridge_status()))
+    if not said.startswith("ok"):
+        raise ValueError(said)
     return f"clip {name} ({info.get('frames', '?')} frames)"
+
+
+def recording_args(info: dict, bridge: dict) -> str:
+    """The clip-run options for a recording: its whole containers, each
+    `info["width"]` link pixels wide over `info["height"]` lines, on the
+    raster streaming now where its line and frame hold them -- a recording
+    made on the camera plays on the camera's raster, and nothing on the
+    cable changes -- else on the least line and frame that do."""
+    cw, h = int(info["width"]), int(info["height"])
+    line, frame = int(bridge["h_total"]), int(bridge["v_total"])
+    least = cw + 48 + ((cw + 48) & 1)
+    if line < least or frame < h + 10:
+        line, frame = max(line, least), max(frame, h + 11)
+    return (f"--clip {CLIP_PATH} --containers {cw} --line-clocks {line} "
+            f"--frame-lines {frame}")
+
+
+def _camera_args() -> str:
+    """The options the camera streamed with before a clip took the bridge,
+    or none -- the sensor's own default mode."""
+    if not CAMERA_ENV.exists():
+        return ""
+    return CAMERA_ENV.read_text().split("=", 1)[-1].strip()
+
+
+def _remember_camera() -> None:
+    """Keep the camera's options to come back to, as a clip takes the
+    bridge from the camera."""
+    env = Path("/run/bridge.env")
+    if env.exists() and not _bridge_plays_clip():
+        CAMERA_ENV.write_text(env.read_text())
 
 
 def _prepare_clip(path: Path) -> dict:
@@ -1332,15 +1368,15 @@ def _prepare_clip(path: Path) -> dict:
             [np.broadcast_to(row, (len(legacy), 1, 1920, 3)), legacy], axis=1)
         header_source = "generated"
 
-    if stack.shape[1:] != (1081, 1920, 3):
-        raise ValueError(
-            f"{path.name}: {stack.shape[2]}x{stack.shape[1] - 1} is not the "
-            "bridge's 1920x1080 raster, which is fixed at build time")
+    if stack.ndim != 4 or stack.shape[-1] != 3 or stack.shape[1] < 2:
+        raise ValueError(f"{path.name}: not whole containers, a header row "
+                         f"and lines of three-byte pixels ({stack.shape})")
     with open(CLIP_PATH + ".new", "wb") as out:
         for i in range(len(stack)):
             out.write(np.ascontiguousarray(stack[i]).tobytes())
     Path(CLIP_PATH + ".new").rename(CLIP_PATH)
-    return {"frames": len(stack), "header": header_source}
+    return {"frames": len(stack), "header": header_source,
+            "width": stack.shape[2], "height": stack.shape[1] - 1}
 
 
 RAW_CAPTURE = "/run/bridge-capture.raw"
@@ -1936,13 +1972,12 @@ def _handler(supervisor: Supervisor):
                                              "bridge": said}
                         return self._send(200, status)
                     if wanted == "file" and spec.get("file") and _bridge_up():
-                        # ONE engine: the bridge draws the clip into the
-                        # same buffer the sensor would have written, so
-                        # the raster, the header and the lock are the
-                        # ones already running. This daemon never takes
-                        # the display. The routing itself lives in
-                        # route_to_bridge, so the keeper reaches the same
-                        # engine for the same intent.
+                        # ONE engine: the bridge plays the recording as a
+                        # clip of its own containers, on the raster
+                        # already streaming where it holds them. This
+                        # daemon never takes the display. The routing
+                        # itself lives in route_to_bridge, so the keeper
+                        # reaches the same engine for the same intent.
                         supervisor.stop()
                         try:
                             drawn = route_to_bridge(spec, supervisor.spool)
@@ -1952,6 +1987,8 @@ def _handler(supervisor: Supervisor):
                             return self._send(503, {
                                 "error": "the bridge did not take the clip"})
                         supervisor._persist_intent(spec)
+                        # a recording is what it is: no 3A
+                        supervisor.firmware_now({"ae": 0, "awb": 0, "af": 0})
                         status = supervisor.status()
                         status["playing"] = {"file": spec["file"],
                                              "by": "bridge", "drawn": drawn}

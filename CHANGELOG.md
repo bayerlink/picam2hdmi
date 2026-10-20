@@ -67,20 +67,19 @@ moves is named here.
   the full 2592x1944 array streams at about 15 fps on a 74.25 MHz link.
   The panel plans no timing a link line cannot carry, and sizes the
   display for what the ISP's crop keeps of a frame bigger than any TV
-  area, not for the frame. A recording made at the old width does not
-  play.
+  area, not for the frame. A recording plays at whatever width it was
+  made (below).
 - **A raw image plays as a mode, with no sensor.** `PUT /source
   {"source": "image", "file": "<name>.npy", "fps": N}` takes a raw Bayer
   `.npy` from the spool -- one frame or several -- packs it by
   bayerlink's own rule, and plans its timing as the camera's is planned:
   a mode whose pixel rate is the link's clock, its line no shorter than
   its width nor than the ISP (the firmware's `isp_khz`) can drain, onto
-  a raster of the TV's table. The bridge restarts as a clip run
-  (`--clip`, `--size`, `--bits`, `--line-clocks`, `--frame-lines`,
-  `--repeat`): no camera opened, frames paced by the display's vblank,
-  each shown `repeat` times for the rate asked; modules are told there
-  is no sensor (`bridge_mode.sensor`), and `bridge status` says
-  `sensor=0`. Choosing the camera after an image restores the camera's
+  a raster of the TV's table. The bridge runs it as a clip run
+  (`--clip`, `--size`, `--bits`, `--line-clocks`, `--frame-lines`): no
+  camera opened, frames paced by the display's vblank, one image frame a
+  link frame for the rate asked; modules are told there is no sensor
+  (`bridge_mode.sensor`), and `bridge status` says `sensor=0`. Choosing the camera after an image restores the camera's
   options.
 - **No line budget in the panel.** The link's line is the sensor's, so the
   fixed 2200-slot budget the panel enforced is gone.
@@ -100,10 +99,27 @@ moves is named here.
 
 ### Changed
 
+- **A recording plays as a clip of its own containers.** `--containers
+  <width>` makes a clip run play whole bayerlink containers -- each
+  frame's recorded header row and its lines, the format, size and mosaic
+  order as the recording's first header states them -- so a replay is the
+  wire as it was captured. A recording of any width plays, on the raster
+  already streaming where its line and frame hold it (a recording made on
+  the camera plays on the camera's), and the camera comes back by
+  reconfiguring the bridge to the options it streamed with. The sensor run
+  no longer replays anything: `bridge source` is gone, with the state and
+  the redraw it needed in the frame loop.
 - **The rasters are bayerlink's** (`bayerlink.rasters`). The proven
   container rasters and the line-slot budget read the one table both ends
   of a link share instead of keeping their own timings; the numbers are
   unchanged, and 720x480 now has its budget checked too.
+
+### Removed
+
+- **`picam2hdmi/bridge.py`**, the Python prototype the C bridge grew
+  from. Nothing ran it -- `picam2hdmi bridge` builds and runs the C
+  bridge, whose header `make check` holds to bayerlink's codec -- and it
+  had none of the genlock, the clip runs or the reconfiguration.
 
 ### Fixed
 
