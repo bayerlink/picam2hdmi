@@ -950,7 +950,7 @@ def _timing_args(want: str, bridge: dict) -> str:
 
 def clip_timing(width: int, height: int, clocks, link_khz: int,
                 isp_khz: int, fps: float | None = None,
-                counters: tuple = (12, 11)) -> dict:
+                counters: tuple = (12, 11), wire: tuple | None = None) -> dict:
     """The link timing a clip of `width` x `height` frames runs on: a mode
     like a sensor's, its pixel rate the link's clock, so its line is
     counted in link clocks, and its least line and frame what carries it
@@ -967,6 +967,13 @@ def clip_timing(width: int, height: int, clocks, link_khz: int,
     counters (`counters`: its bits of pixels and lines) or the picture,
     the line moves to the nearest that fits. No floor is applied: a TV
     that cannot follow a rate shows no signal, which is the truth.
+
+    `wire` is the link raster streaming now, (h_total, v_total). Where it
+    carries the clip at exactly the rate asked -- its line no shorter, its
+    frame no shorter, its display inside the counters -- it is the plan:
+    the camera's 1080p30 carries a 1080 image at 30 fps, and planning
+    another raster for it would change the mode on the cable, and on the
+    TV, for nothing.
     {"raster", "line_clocks", "frame_lines", "repeat", "hz"}; a rate the
     link cannot carry at all is refused."""
     import math
@@ -988,6 +995,12 @@ def clip_timing(width: int, height: int, clocks, link_khz: int,
             clk = display_clock(clocks, width, height, link_khz, ht)
             return (frame_min <= v <= v_max
                     and ht * clk / link_khz < (1 << xb))
+        if wire:
+            ht, vt = (int(n) for n in wire)
+            if (abs(link_khz * 1e3 / (ht * vt) - fps) <= fps * 1e-9
+                    and ht >= even(line_min) and fits(ht, vt)):
+                return {"raster": None, "line_clocks": ht, "frame_lines": vt,
+                        "repeat": 1, "hz": link_khz * 1e3 / (ht * vt)}
         rate = lambda ht: round(link_khz * 1e3 / (ht * fps))
         if not fits(even(line), rate(even(line))):
             # the line the rate needs: long enough that the frame fits the
@@ -1085,9 +1098,11 @@ def image_plan(spec: dict, w: int, h: int, bridge: dict,
     clocks = [int(c) for c in firmware.get("tv_khz", str(TV_KHZ)).split(",")]
     counters = tuple(int(n) for n in
                      firmware.get("counters", "12x11").split("x"))
+    wire = ((bridge["h_total"], bridge["v_total"])
+            if "h_total" in bridge and "v_total" in bridge else None)
     t = clip_timing(w, h, clocks, int(bridge["link_khz"]),
                     int(firmware.get("isp_khz", 0)), spec.get("fps"),
-                    counters)
+                    counters, wire)
     return (f"--clip {IMAGE_CLIP} --size {w}x{h} --bits {bits} "
             f"--order {order} --line-clocks {t['line_clocks']} "
             f"--frame-lines {t['frame_lines']} --repeat {t['repeat']}")

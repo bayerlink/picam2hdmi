@@ -723,6 +723,23 @@ def test_an_image_runs_at_the_rate_asked_by_its_frame_length():
     assert t["frame_lines"] != base["frame_lines"]
 
 
+def test_an_image_at_the_rate_on_the_wire_keeps_the_wire():
+    """The camera's 1080p30 -- 4400 x 1125 at 148.5 MHz, exactly 30 Hz --
+    carries a 1920x1080 image asked for at 30 fps, so the image is planned
+    onto it and nothing on the cable changes; at a rate the wire does not
+    run, or on a wire whose line is too short, the image's own plan."""
+    from picam2hdmi.serve import clip_timing
+    t = clip_timing(1920, 1080, CLOCKS, 148500, 142857, fps=30,
+                    wire=(4400, 1125))
+    assert (t["line_clocks"], t["frame_lines"]) == (4400, 1125)
+    own = clip_timing(1920, 1080, CLOCKS, 148500, 142857, fps=30)
+    assert clip_timing(1920, 1080, CLOCKS, 148500, 142857, fps=31,
+                       wire=(4400, 1125))["line_clocks"] != 4400
+    # 1980 link clocks: shorter than the ISP drains a 1920 line
+    assert clip_timing(1920, 1080, CLOCKS, 148500, 142857, fps=30,
+                       wire=(1980, 2500)) == own
+
+
 def test_a_rate_past_the_displays_counters_moves_the_line():
     """5 fps on 1080p60's line is a frame of 13500 lines, past an 11-bit
     line counter: the line lengthens instead, the frame stays inside, and

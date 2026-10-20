@@ -18,8 +18,11 @@ moves is named here.
   follows as it must with no frame store, with no floor applied. The
   image's line is kept and the frame made as long as the rate takes;
   where the display's counters (from the firmware's status) cannot reach
-  it, the line moves, down to 480p's clock for the longest. A rate the
-  link cannot carry is refused with the range it can.
+  it, the line moves, down to 480p's clock for the longest. Where the
+  raster already on the wire carries the image at exactly the rate asked
+  -- the camera's 1080p30 does a 1080 image at 30 fps -- the image is
+  planned onto it, so the switch changes nothing on the cable or on the
+  TV. A rate the link cannot carry is refused with the range it can.
 
 - **The bridge reconfigures without restarting.** `bridge reconfigure
   <args>` takes the words BRIDGE_ARGS holds, parsed by the one parser the
