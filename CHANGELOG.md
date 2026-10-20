@@ -18,11 +18,24 @@ moves is named here.
   follows as it must with no frame store, with no floor applied. The
   image's line is kept and the frame made as long as the rate takes;
   where the display's counters (from the firmware's status) cannot reach
-  it, the line moves, down to 480p's clock for the longest. A new image of
-  the same size and timing goes in live (`bridge play`), a new rate on the
-  same line is a new frame length set on the running display (`bridge
-  retime`), and only anything else restarts the bridge. A rate the link
-  cannot carry is refused with the range it can.
+  it, the line moves, down to 480p's clock for the longest. A rate the
+  link cannot carry is refused with the range it can.
+
+- **The bridge reconfigures without restarting.** `bridge reconfigure
+  <args>` takes the words BRIDGE_ARGS holds, parsed by the one parser the
+  command line uses, and the panel switches every source and rate with
+  it: the bridge owns the display for its whole life, so nothing else
+  drives the cable between two configurations. The wire changes the
+  least it can -- nothing where the mode and the buffers already hold,
+  so a new image of the same timing is simply the next frame; a mode set
+  once, in a vertical blank, where the timing moves; new buffers, drawn
+  before they go on, where the geometry does. The run ending finishes its
+  frame whole, every run counts its frames from 0, and the answer is the
+  outcome: ok once the new configuration streams, or the refusal with the
+  previous one streaming again. Before a mode set the header is cleared a
+  vertical blank ahead of it: the display drops the old mode ~20 ms after
+  the call, and the cut used to land in a picture, which the far end
+  showed cut short.
 
 - **The link carries the sensor as it is.** The link raster is derived
   from the sensor's own timing in its mode -- one sensor line a link line,

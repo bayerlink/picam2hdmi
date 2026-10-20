@@ -1096,6 +1096,22 @@ def image_plan(spec: dict, w: int, h: int, bridge: dict,
 CAMERA_ENV = Path("/run/bridge.camera.env")
 
 
+def _bridge_reconfigure(args: str) -> str:
+    """The bridge made to stream `args` -- the words BRIDGE_ARGS holds --
+    without a restart. The bridge answers with the outcome: "ok ..." once
+    the new configuration streams, or "err <why>" with the previous one
+    streaming again. The env file is written after, so a bridge that does
+    restart -- a crash, a reboot -- comes back to the configuration that
+    was running."""
+    try:
+        said = _bridge_command(f"bridge reconfigure {args}", timeout=30.0)
+    except OSError as error:
+        return f"err the bridge did not answer: {error}"
+    if said.startswith("ok"):
+        Path("/run/bridge.env").write_text(f"BRIDGE_ARGS={args}\n")
+    return said
+
+
 def _bridge_plays_clip() -> bool:
     """Whether the bridge runs a clip, with no sensor."""
     try:
@@ -1793,13 +1809,13 @@ def _handler(supervisor: Supervisor):
                         # not quietly dropped. Accepting a mode change
                         # and then not changing the mode is the worst of
                         # the three possible answers.
-                        # A MODE change is a restart, by design: the
-                        # whole start-up path recomputes the line lock
-                        # from the sensor's pixel rate and the new
-                        # geometry. The frame need only fit the raster;
-                        # it sits inside it and the header carries the
-                        # truth. Disturbing the picture is the agreed
-                        # price of changing geometry.
+                        # A MODE is a reconfiguration of the running
+                        # bridge: the line lock recomputed from the
+                        # sensor's pixel rate and the new geometry by the
+                        # path start-up takes, the link left alone where
+                        # its timing does not move. The frame need only
+                        # fit the raster; it sits inside it and the
+                        # header carries the truth.
                         # The mode is the sensor's size; its rate is the
                         # sensor's own, and the link follows it.
                         mode = spec.get("cam_mode")
@@ -1821,29 +1837,13 @@ def _handler(supervisor: Supervisor):
                             except OSError:
                                 pass
                             if want != now or playing:
-                                env = Path("/run/bridge.env")
-                                # Keep what worked. A mode the link
-                                # cannot carry must not leave the bench
-                                # unable to come back: without this the
-                                # refused mode stays in the env file and
-                                # every later start fails on it too, so
-                                # one bad choice is a dead end.
-                                before = (env.read_text()
-                                          if env.exists() else None)
-                                env.write_text(f"BRIDGE_ARGS={args}\n")
-                                _bridge_service("restart")
-                                if not _bridge_up():
-                                    if before is None:
-                                        env.unlink(missing_ok=True)
-                                    else:
-                                        env.write_text(before)
-                                    _bridge_service("restart")
-                                    said = _bridge_last_words()
+                                # a mode the link cannot carry is refused
+                                # by the bridge, which keeps streaming
+                                # what it did
+                                said = _bridge_reconfigure(args)
+                                if not said.startswith("ok"):
                                     return self._send(503, {
-                                        "error": said or (
-                                            f"the bridge did not come back "
-                                            f"after asking for {want}"),
-                                        "reverted": True})
+                                        "error": said, "reverted": True})
                         ignored = [k for k in ("crop",)
                                    if spec.get(k) is not None]
                         supervisor.stop()
@@ -1873,12 +1873,11 @@ def _handler(supervisor: Supervisor):
                         # A raw image is a MODE, like the sensor's: its
                         # size and depth the image's, its timing planned
                         # onto a raster of the TV's table -- by the rule
-                        # that plans the camera's -- and the bridge restarts
-                        # on it with no sensor at all, the clip paced by the
-                        # display. The camera's options are kept to come
-                        # back to.
+                        # that plans the camera's -- and the bridge
+                        # reconfigured to it with no sensor at all, the clip
+                        # paced by the display. The camera's options are
+                        # kept to come back to.
                         supervisor.stop()
-                        import re
                         stored = supervisor.stored_spec() or {}
                         playing = _bridge_plays_clip()
                         same_image = (playing
@@ -1903,57 +1902,23 @@ def _handler(supervisor: Supervisor):
                             return self._send(400, {"error": str(error)})
                         env = Path("/run/bridge.env")
                         before = env.read_text() if env.exists() else None
-                        running = before.split("=", 1)[1].strip() \
-                            if before else ""
-                        timing = lambda a: re.sub(
-                            r" --(frame-lines|repeat) \d+", "", a)
-                        frame = lambda a: (re.search(r"--frame-lines (\d+)",
-                                                     a) or [0, "0"])[1]
-                        if playing and timing(args) == timing(running):
-                            # the same link line, frame size and depth: the
-                            # smallest step that gets there -- a new image
-                            # put in live, a new rate a new frame length set
-                            # on the running display, nothing restarted
-                            steps = ([] if same_image else
-                                     [f"bridge play {IMAGE_CLIP}"])
-                            if frame(args) != frame(running):
-                                steps.append(f"bridge retime {frame(args)}")
-                            for line in steps:
-                                said = _bridge_command(line, timeout=5.0)
-                                if not said.startswith("ok"):
-                                    return self._send(400, {"error": said})
-                            env.write_text(f"BRIDGE_ARGS={args}\n")
-                            supervisor._persist_intent(spec)
-                            if frame(args) != frame(running):
-                                # the display follows the link's new frame
-                                supervisor.firmware_now(
-                                    {"ae": 0, "awb": 0, "af": 0})
-                            status = supervisor.status()
-                            status["playing"] = {"image": spec["file"],
-                                                 "by": "bridge", "args": args,
-                                                 "live": steps}
-                            return self._send(200, status)
-                        if before and not _bridge_plays_clip():
+                        # One reconfiguration, whatever changed: the
+                        # bridge compares, and on a link of the same
+                        # timing the next frame is simply the new
+                        # image's; a new rate sets the mode once
+                        said = _bridge_reconfigure(args)
+                        if not said.startswith("ok"):
+                            return self._send(400, {"error": said,
+                                                    "reverted": True})
+                        if before and not playing:
                             CAMERA_ENV.write_text(before)
-                        env.write_text(f"BRIDGE_ARGS={args}\n")
-                        _bridge_service("restart")
-                        if not _bridge_up():
-                            if before is None:
-                                env.unlink(missing_ok=True)
-                            else:
-                                env.write_text(before)
-                            _bridge_service("restart")
-                            return self._send(503, {
-                                "error": _bridge_last_words() or
-                                "the bridge did not take the image",
-                                "reverted": True})
                         supervisor._persist_intent(spec)
                         # no sensor, so no 3A: the image is what it is
-                        supervisor.firmware_now(
-                            {"ae": 0, "awb": 0, "af": 0})
+                        supervisor.firmware_now({"ae": 0, "awb": 0, "af": 0})
                         status = supervisor.status()
                         status["playing"] = {"image": spec["file"],
-                                             "by": "bridge", "args": args}
+                                             "by": "bridge", "args": args,
+                                             "bridge": said}
                         return self._send(200, status)
                     if wanted == "file" and spec.get("file") and _bridge_up():
                         # ONE engine: the bridge draws the clip into the
