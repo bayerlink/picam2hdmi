@@ -448,7 +448,8 @@ class Supervisor:
         return self.firmware_now(aaa, run, once=True) is not None
 
     def firmware_now(self, aaa: dict | None = None, run: int | None = None,
-                     once: bool = False) -> str | None:
+                     once: bool = False,
+                     display: str | None = None) -> str | None:
         """Bring the firmware up now: the panel's camera start and the
         keeper share this, under one lock, and both mark the bridge run
         as done. With `once`, a run already done is left alone -- checked
@@ -466,7 +467,7 @@ class Supervisor:
                 except (OSError, ValueError):
                     run = None
             self._firmware_run = run
-            self.firmware = _firmware_up(aaa)
+            self.firmware = _firmware_up(aaa, display)
             return self.firmware
 
     def keep(self, interval: float = 5.0) -> None:
@@ -886,6 +887,24 @@ def parse_modes(reply: str) -> list[dict]:
     return modes
 
 
+def _frame_fields(status: dict, modes: list | None) -> dict:
+    """The frame the bridge streams, as the firmware's init takes it: the
+    sensor module's mode of its size and depth, by name -- whatever the
+    mode brings comes with it -- or, where the module states none, the
+    frame itself."""
+    from bayerlink.protocol import BAYER_PHASE
+    mode = next((m["name"] for m in modes or ()
+                 if (m["width"], m["height"], m["bits"]) ==
+                 (int(status["width"]), int(status["height"]),
+                  int(status["bits"]))), None)
+    if mode:
+        return {"mode": mode}
+    return {"frame.width": int(status["width"]),
+            "frame.height": int(status["height"]),
+            "frame.bits": int(status["bits"]),
+            "frame.bayer_phase": BAYER_PHASE.get(status.get("order"), 0)}
+
+
 def firmware_init(status: dict, aaa: dict | None = None,
                   tv_khz: int = TV_KHZ, modes: list | None = None,
                   counters: tuple = (12, 11)) -> str:
@@ -896,21 +915,11 @@ def firmware_init(status: dict, aaa: dict | None = None,
     link's timing -- the link's clock and totals ARE the sensor's line and
     frame -- the picture centred, the 3A settings. No rate appears: the TV
     raster takes the link's line and frame times, whatever they are."""
-    from bayerlink.protocol import BAYER_PHASE
-
     khz, ht, vt = (int(status[k]) for k in ("link_khz", "h_total", "v_total"))
     tv = display_raster(int(status["width"]), int(status["height"]), khz,
                         ht, vt, tv_khz, counters)
-    mode = next((m["name"] for m in modes or ()
-                 if (m["width"], m["height"], m["bits"]) ==
-                 (int(status["width"]), int(status["height"]),
-                  int(status["bits"]))), None)
-    frame = ({"mode": mode} if mode else {
-        "frame.width": status["width"], "frame.height": status["height"],
-        "frame.bits": status["bits"],
-        "frame.bayer_phase": BAYER_PHASE[status["order"]]})
     fields = {
-        **frame,
+        **_frame_fields(status, modes),
         **{f"display.{f}": int(tv[f]) for f in (
             "pixel_khz", "h_total", "v_total", "h_active", "v_active",
             "hs_beg", "hs_end", "vs_beg", "vs_end", "hsync_positive",
@@ -923,6 +932,51 @@ def firmware_init(status: dict, aaa: dict | None = None,
             **({"exposure_max": int(status["exposure_max"])}
                if "exposure_max" in status else {}),
             **(aaa or {})}.items()},
+    }
+    return "init " + " ".join(f"{k}={v}" for k, v in fields.items())
+
+
+def named_display(name: str, clocks, counters: tuple = (12, 11)) -> dict:
+    """The display raster `name` names (bayerlink's table), as the
+    firmware's display fields -- refused where the board makes no clock
+    for it or its totals outrun the display's counters."""
+    from bayerlink.rasters import raster
+    try:
+        r = raster(name)
+    except (KeyError, ValueError) as error:
+        raise ValueError(f"no display mode {name!r}: {error}") from None
+    rows = sorted(int(c) for c in clocks)
+    if r.pixel_khz not in rows:
+        raise ValueError(f"{name} needs a {r.pixel_khz} kHz display clock; "
+                         f"the board makes {rows}")
+    xb, yb = counters
+    if r.h_total >= 1 << xb or r.v_total >= 1 << yb:
+        raise ValueError(f"{name}'s {r.h_total}x{r.v_total} raster is longer "
+                         f"than the display's counters ({xb} by {yb} bits)")
+    return {"pixel_khz": r.pixel_khz, "h_total": r.h_total,
+            "v_total": r.v_total, "h_active": r.h_active,
+            "v_active": r.v_active, "hs_beg": r.hs_beg, "hs_end": r.hs_end,
+            "vs_beg": r.vs_beg, "vs_end": r.vs_end,
+            "hsync_positive": int(r.hsync_positive),
+            "vsync_positive": int(r.vsync_positive)}
+
+
+def firmware_init_display(status: dict, display: dict | None,
+                          aaa: dict | None = None,
+                          modes: list | None = None) -> str:
+    """The firmware's `init` for a board that keeps the pictures: the
+    frame as the bridge streams it -- by its mode where the sensor module
+    has one, which brings the display its pictures are shown on -- and
+    the display the one given, else the mode's, else the one the firmware
+    holds; at its own rate, nothing genlocking it to the link; the picture
+    centred, no sensor of the firmware's to set and so no 3A unless
+    asked."""
+    fields = {
+        **_frame_fields(status, modes),
+        **{f"display.{k}": int(v) for k, v in (display or {}).items()},
+        "window.center": 1,
+        **{f"aaa.{k}": int(v) for k, v in
+           {"ae": 0, "awb": 0, "af": 0, **(aaa or {})}.items()},
     }
     return "init " + " ".join(f"{k}={v}" for k, v in fields.items())
 
@@ -1144,15 +1198,26 @@ def _bridge_status() -> dict:
     return dict(t.split("=", 1) for t in r[3:].split() if "=" in t)
 
 
-def _firmware_up(aaa: dict | None = None) -> str:
-    """Bring the firmware up at what the bridge streams; its reply, or
-    why it could not be asked."""
+def _firmware_up(aaa: dict | None = None, display: str | None = None) -> str:
+    """Bring the firmware up at what the bridge streams -- where the board
+    keeps the pictures, on the display named, or the one the firmware
+    holds; else on the raster the link's timing makes -- its reply, or why
+    it could not be asked."""
     try:
         status = _bridge_status()
         # the clock the board's display makes, as its firmware says
         fw = _bridge_command("status")
         tv = dict(t.split("=", 1) for t in fw.split() if "=" in t)
         clocks = tv.get("tv_khz", str(TV_KHZ)).split(",")
+        counters = tuple(int(n) for n in tv.get("counters", "12x11").split("x"))
+        if tv.get("keeps") == "1":
+            line = firmware_init_display(
+                status, display and named_display(display, clocks, counters),
+                aaa, modes=parse_modes(_bridge_command("modes")))
+            return _bridge_command(line, timeout=15.0)
+        if display:
+            return (f"err the board shows the link's own timing; a display "
+                    f"({display}) is chosen only where it keeps the pictures")
         line = firmware_init({**status, "width": int(status["width"]),
                               "height": int(status["height"]),
                               "bits": int(status["bits"])}, aaa,
@@ -1909,8 +1974,11 @@ def _handler(supervisor: Supervisor):
                         supervisor._persist_intent(intent)
                         # the firmware, brought up at what now streams:
                         # the bridge replays it on every link edge after,
-                        # and the keeper counts this run as done
-                        supervisor.firmware_now(spec.get("aaa"))
+                        # and the keeper counts this run as done. A display
+                        # named here is this run's; the mode states the
+                        # one its pictures are shown on
+                        supervisor.firmware_now(spec.get("aaa"),
+                                                display=spec.get("display"))
                         status = supervisor.status()
                         if ignored:
                             status["ignored"] = {

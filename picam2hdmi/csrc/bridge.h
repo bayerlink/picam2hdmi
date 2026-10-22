@@ -51,8 +51,10 @@ struct bridge_mode {
     const struct bridge_raster *raster;
     uint32_t width, height;     /* the frame: the sensor's, or the clip's */
     uint32_t lines;             /* active lines scanned: height + header */
-    int sensor;                 /* 1: a sensor streams; 0: a clip does, and
-                                   there is no sensor to set */
+    int sensor;                 /* 1: a sensor streams, a module's to set;
+                                   0: none is -- a clip streams, or a
+                                   sensor whose frames come in loops, set
+                                   by the controls its run states */
 };
 
 /* The LINK hook: called once after start-up with the initial state,
@@ -91,5 +93,23 @@ int bridge_ddc_read(uint16_t reg, uint32_t *value);
  * frame thread between frames -- same budget rules as the frame
  * hook. */
 void bridge_command_hook(const char *cmd, char *reply, size_t cap);
+
+/* The SOURCE hook: what the module that describes the sensor states of
+ * it, asked before each sensor run -- how its frames come and what its
+ * driver is to be set to. The run's own options (--loop, --ctrl) win
+ * where they are given. Fill what the sensor states; leave the rest. */
+struct bridge_control {
+    const char *name;       /* as V4L2 tools print it: "trigger_mode" */
+    int32_t value;
+};
+
+struct bridge_source {
+    unsigned loop;          /* frames come in loops of this many, each
+                               sent as it comes; 0: one picture a frame */
+    const struct bridge_control *controls;
+    int n_controls;         /* set before the sensor streams */
+};
+
+void bridge_source_hook(struct bridge_source *s);
 
 #endif

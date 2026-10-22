@@ -11,6 +11,47 @@ moves is named here.
 
 ### Added
 
+- **The bridge carries a sensor whose frames come in loops** (`--loop
+  N`) -- a time-of-flight module's reference phases, four to a
+  measurement -- as it carries any sensor's: unicam writes each frame into
+  a buffer the display scans, the samples untouched, and the CPU writes
+  the header. Such a sensor takes a loop's frames a few milliseconds
+  apart and then waits most of a loop, so each frame lands in a buffer of
+  its own and goes on the wire at the first vertical blank after it
+  arrived, in order; a blank with nothing new clears the header, so the
+  far end -- a frame store -- sees no frame there. The link runs 5%
+  faster than the sensor's frame rate, timed from its frames at start, so
+  the frames waiting drain between bursts and none is dropped. Where in
+  its loop a frame is comes from when it arrived -- a loop starts after
+  the long gap -- and each loop's first frame takes the next multiple of
+  N in `frame_seq`, so `frame_seq % N` is its place on the wire. The
+  format is the sensor's own, found by its media-bus code.
+
+- **A loop run's frame and its count go out together.** Each frame has a
+  header row of its own, and the header's buffer and the payload's swap in
+  one atomic commit, so the display takes both in the same blank. Written
+  into the buffer already on the wire once the payload's overlay change
+  returned, the header missed that frame's top line and went out with the
+  next, so every frame reached the far end with its predecessor's count
+  -- in order, none lost, every phase one place off.
+
+- **Driver controls by name** (`--ctrl name=value`, repeatable), set
+  before the sensor streams, each one the driver must have.
+
+- **The sensor's module says how its frames come.** A new hook,
+  `bridge_source_hook`, lets the module describing the sensor state its
+  loop and its driver controls; the bridge asks it before each sensor
+  run, and the run's own options win where given. So a bridge started
+  with no options -- the service, after a power cut -- streams a
+  time-of-flight module correctly with nothing restated on the Pi.
+
+- **The display is the mode's where the board keeps the pictures.** When
+  the firmware reports `keeps=1`, the panel brings it up on the sensor
+  module's mode of the frame the bridge streams, which brings the display
+  its pictures are shown on; a display the source names (`"display":
+  "1080p60"`, bayerlink's raster table) is that run's alone, never stored.
+  A board showing the link's own timing refuses a named display.
+
 - **An image plays at the rate asked, and changes the least it can.** The
   panel lists the spool's raw images apart from its recordings, each
   played by the bridge with no sensor; an image's rate is the link's own

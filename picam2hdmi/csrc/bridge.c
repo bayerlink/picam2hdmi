@@ -120,6 +120,10 @@ static const struct {
      v4l2_fourcc('p', 'G', 'C', 'C')},
     {"BGGR", 12, MEDIA_BUS_FMT_SBGGR12_1X12, V4L2_PIX_FMT_SBGGR12P,
      v4l2_fourcc('p', 'B', 'C', 'C')},
+    /* No mosaic: samples that are not light through a colour filter -- a
+     * time-of-flight module's phase correlations. */
+    {"MONO", 12, MEDIA_BUS_FMT_Y12_1X12,     V4L2_PIX_FMT_Y12P,
+     v4l2_fourcc('Y', '1', '2', 'P')},
 };
 
 /* The row in force: set by discovery, overridden by --order, and the
@@ -146,10 +150,12 @@ static int order_phase(const char *order) {
 }
 
 static int format_after_crop(int row, unsigned x0, unsigned y0) {
+    if (!strcmp(FORMATS[row].order, "MONO")) return row;   /* no phase */
     int phase = order_phase(FORMATS[row].order)
                 ^ (int)((y0 & 1u) << 1) ^ (int)(x0 & 1u);
     for (unsigned i = 0; i < sizeof FORMATS / sizeof *FORMATS; i++)
         if (FORMATS[i].bits == FORMATS[row].bits &&
+            strcmp(FORMATS[i].order, "MONO") &&
             order_phase(FORMATS[i].order) == phase)
             return (int)i;
     return row;                               /* unreachable: 4 per depth */
@@ -176,7 +182,7 @@ static int order_given;                     /* --order beats discovery */
  * there is one sensor. It is not an identity: two cameras of the same
  * model are two sources, and calibration reaches the receiver over the
  * link's register channel, not by being guessed from this number. */
-#define SOURCE_ID_OV5647 0
+#define SOURCE_ID 0
 
 /* The modeline scanned out: the chosen raster VERBATIM, claiming one
  * more active line than it has -- the header row -- inside its own
@@ -298,6 +304,9 @@ __attribute__((weak)) void bridge_command_hook(const char *cmd, char *reply,
                                                size_t cap) {
     (void)cmd;
     snprintf(reply, cap, "err no installed module speaks commands");
+}
+__attribute__((weak)) void bridge_source_hook(struct bridge_source *s) {
+    (void)s;
 }
 
 /* ---------------------------------------------------------------- */
@@ -494,6 +503,10 @@ static int scratch_fd = -1;
 /* A clip run (--clip): no sensor at all, the link timed by the clip's
  * own line and frame lengths and paced by the display's vblank. */
 static int CLIP_RUN;
+/* A loop run (--loop N): a sensor whose frames come in loops of N, each
+ * frame carried one a link frame and paced by the display's vblank. N,
+ * or 0. */
+static unsigned LOOP_RUN;
 /* the clip a clip run plays: its frames mapped, and how many */
 static const uint8_t *CLIP;
 static size_t CLIP_SIZE, CLIP_FRAMES, CLIP_FBYTES;
@@ -558,7 +571,7 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
                  "phase=%.2f margin=%.0f "
                  "vblank=%d uptime=%ld exposure=%d gain=%d sensor=%d",
                  bstate.seq, bstate.locked, paused,
-                 CLIP_RUN ? "file" : "sensor", WIDTH,
+                 CLIP_RUN ? "file" : LOOP_RUN ? "loop" : "sensor", WIDTH,
                  HEIGHT,
                  FORMATS[fmt_row].bits, FORMATS[fmt_row].order,
                  RASTER ? RASTER->pixel_khz : 0, RASTER ? RASTER->h_total : 0,
@@ -663,6 +676,11 @@ static void bridge_builtin(const char *cmd, char *reply, size_t cap) {
 /* the same words, parsed by the same function, so the two cannot     */
 /* drift; the panel sends what it would have put in BRIDGE_ARGS.      */
 /* ---------------------------------------------------------------- */
+/* The longest loop of frames a sensor may come in (--loop), and the
+ * most driver controls a run sets (--ctrl). */
+#define LOOP_MAX 16
+#define CTRLS_MAX 8
+
 struct bridge_args {
     int seconds, margin_lines, test_pattern, selftest, order_given;
     char order[8];
@@ -673,6 +691,15 @@ struct bridge_args {
     /* a clip of whole bayerlink containers -- each frame a header row
      * and its lines, this many link pixels wide -- not payload rows */
     unsigned containers;
+    /* a sensor whose frames come in loops of this many -- a
+     * measurement's, a time-of-flight module's reference phases -- each
+     * sent as it comes; 0: one picture a frame */
+    unsigned loop;
+    /* driver controls set before it streams, by the names V4L2 tools
+     * print */
+    char ctrl_name[CTRLS_MAX][48];
+    int32_t ctrl_value[CTRLS_MAX];
+    int n_ctrls;
 };
 
 /* 0; -1 with `why` said; -2 for a word it does not know. */
@@ -730,6 +757,19 @@ static int parse_args(int argc, char **argv, struct bridge_args *a,
             snprintf(a->video, sizeof a->video, "%s", v);
         else if (!strcmp(k, "--subdev"))
             snprintf(a->subdev, sizeof a->subdev, "%s", v);
+        else if (!strcmp(k, "--loop")) a->loop = (unsigned)atoi(v);
+        else if (!strcmp(k, "--ctrl")) {
+            const char *eq = strchr(v, '=');
+            if (a->n_ctrls == CTRLS_MAX || !eq || eq == v ||
+                (size_t)(eq - v) >= sizeof a->ctrl_name[0]) {
+                snprintf(why, cap, "--ctrl wants name=value, %d at most",
+                         CTRLS_MAX);
+                return -1;
+            }
+            snprintf(a->ctrl_name[a->n_ctrls], sizeof a->ctrl_name[0],
+                     "%.*s", (int)(eq - v), v);
+            a->ctrl_value[a->n_ctrls++] = (int32_t)strtol(eq + 1, NULL, 0);
+        }
         else {
             snprintf(why, cap, "unknown arg %s", k);
             return -2;
@@ -740,6 +780,14 @@ static int parse_args(int argc, char **argv, struct bridge_args *a,
                     (int)a->clip_bits) < 0 || !a->clip_w || !a->clip_h)) {
         snprintf(why, cap, "a clip needs --size WxH and a mosaic order and "
                  "depth bayerlink names (--order, --bits)");
+        return -1;
+    }
+    if (a->clip[0] && a->loop) {
+        snprintf(why, cap, "--clip and --loop are two sources; name one");
+        return -1;
+    }
+    if (a->loop && (a->loop < 2 || a->loop > LOOP_MAX)) {
+        snprintf(why, cap, "--loop wants 2 to %d frames", LOOP_MAX);
         return -1;
     }
     return 0;
@@ -845,7 +893,10 @@ static void link_watch(int force) {
     if (up) ddc_probe(conn_dir);
     BMODE = (struct bridge_mode){ .raster = RASTER, .width = WIDTH,
                                   .height = HEIGHT, .lines = VDISP,
-                                  .sensor = !CLIP_RUN };
+                                  /* a time-of-flight module is the
+                                   * bridge's to set: no module speaks
+                                   * for it */
+                                  .sensor = !CLIP_RUN && !LOOP_RUN };
     struct bridge_link l = { .up = up, .edid = up ? edid : NULL,
                              .mode = &BMODE };
     printf("bridge: link %s\n", up ? "up" : "down");
@@ -918,22 +969,24 @@ static struct dumb make_fb(int fd, uint32_t w, uint32_t h) {
     return d;
 }
 
-static uint32_t overlay_plane(int fd, int crtc_index) {
+/* A plane of `type` the CRTC can use -- a free one, where `free_only` --
+ * or 0. */
+static uint32_t find_plane(int fd, int crtc_index, uint64_t type,
+                           int free_only) {
     drmModePlaneResPtr planes = drmModeGetPlaneResources(fd);
     if (!planes) die("GetPlaneResources");
     uint32_t found = 0;
     for (uint32_t i = 0; i < planes->count_planes && !found; i++) {
         drmModePlanePtr p = drmModeGetPlane(fd, planes->planes[i]);
         if (!p) continue;
-        if ((p->possible_crtcs & (1u << crtc_index)) && p->fb_id == 0) {
-            /* overlay only: a cursor plane would take the SETPLANE and
-             * refuse the size twenty minutes later, in the compositor */
+        if ((p->possible_crtcs & (1u << crtc_index))
+            && (!free_only || p->fb_id == 0)) {
             drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(
                 fd, p->plane_id, DRM_MODE_OBJECT_PLANE);
             for (uint32_t j = 0; props && j < props->count_props; j++) {
                 drmModePropertyPtr pr = drmModeGetProperty(fd, props->props[j]);
                 if (pr && !strcmp(pr->name, "type")
-                    && props->prop_values[j] == DRM_PLANE_TYPE_OVERLAY)
+                    && props->prop_values[j] == type)
                     found = p->plane_id;
                 drmModeFreeProperty(pr);
             }
@@ -942,8 +995,30 @@ static uint32_t overlay_plane(int fd, int crtc_index) {
         drmModeFreePlane(p);
     }
     drmModeFreePlaneResources(planes);
+    return found;
+}
+
+/* The overlay the payload rides: overlay only -- a cursor plane would
+ * take the SETPLANE and refuse the size twenty minutes later, in the
+ * compositor. */
+static uint32_t overlay_plane(int fd, int crtc_index) {
+    uint32_t found = find_plane(fd, crtc_index, DRM_PLANE_TYPE_OVERLAY, 1);
     if (!found) { fprintf(stderr, "no overlay plane free\n"); exit(1); }
     return found;
+}
+
+/* A plane's property, by name: its id, or 0. */
+static uint32_t plane_prop(int fd, uint32_t plane, const char *name) {
+    drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(
+        fd, plane, DRM_MODE_OBJECT_PLANE);
+    uint32_t id = 0;
+    for (uint32_t j = 0; props && j < props->count_props && !id; j++) {
+        drmModePropertyPtr pr = drmModeGetProperty(fd, props->props[j]);
+        if (pr && !strcmp(pr->name, name)) id = pr->prop_id;
+        drmModeFreeProperty(pr);
+    }
+    drmModeFreeObjectProperties(props);
+    return id;
 }
 
 static void force_full_range(int fd, uint32_t connector_id) {
@@ -1101,6 +1176,9 @@ static int open_display(int *dfd_out, uint32_t *conn_out, uint32_t *crtc_out,
     if (dfd < 0) dfd = open("/dev/dri/card0", O_RDWR);
     if (dfd < 0) die("open dri");
     drmSetClientCap(dfd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+    /* atomic, for the one change that must land whole: a loop run's
+     * header and payload, on two planes, in one vertical blank */
+    drmSetClientCap(dfd, DRM_CLIENT_CAP_ATOMIC, 1);
 
     /* The sink may not be there YET. At power-on the board downstream
      * boots and loads its bitstream a minute or two after this Pi, and
@@ -1192,6 +1270,9 @@ static uint32_t sink_link_khz(void) {
 static struct {
     int dfd, crtc_index;
     uint32_t crtc, conn, plane;
+    /* the primary plane, which scans the header row's buffer, and each
+     * plane's FB_ID property, for a change of both in one commit */
+    uint32_t primary, primary_fb, plane_fb;
     drmModeModeInfo mode;               /* on the wire; clock 0: none yet */
 } D = {.dfd = -1};
 
@@ -1342,7 +1423,7 @@ static void run_started(void) {
     bstate.started = time(NULL);
     link_watch(1);
     reconfig_answer("ok %s %ux%u of %ux%u at %u kHz, %u Hz",
-                    CLIP_RUN ? "clip" : "sensor", WIDTH, HEIGHT,
+                    CLIP_RUN ? "clip" : LOOP_RUN ? "loop" : "sensor", WIDTH, HEIGHT,
                     LINK.h_total, LINK.v_total, LINK.pixel_khz, LINK.hz);
 }
 
@@ -1367,7 +1448,7 @@ static void draw_clip(struct container *c, size_t at, int whole, size_t bytes) {
 }
 
 static int run_clip(const struct bridge_args *a) {
-    CLIP_RUN = 1; paused = 0;
+    CLIP_RUN = 1; LOOP_RUN = 0; paused = 0;
     char why[256];
     /* A clip of whole containers is a recording of the wire, and it goes
      * back out as it was: each frame's own header row, the frame's
@@ -1428,7 +1509,7 @@ static int run_clip(const struct bridge_args *a) {
      * so the first frame of a new mode is a whole one */
     struct container *c = display_buffers(LINK.h_active, VDISP, HEIGHT);
     if (c == &NEW) {
-        if (!whole) pack_header(c->base.map, 0, SOURCE_ID_OV5647);
+        if (!whole) pack_header(c->base.map, 0, SOURCE_ID);
         draw_clip(c, 0, whole, bytes);
     }
     if (display_show(&MODE, why, sizeof why) < 0) return refuse("%s", why);
@@ -1449,7 +1530,7 @@ static int run_clip(const struct bridge_args *a) {
         /* the frame on the wire is whole, and repeats until the next
          * configuration draws over it */
         if (reconfig_pending) return RUN_RECONFIGURE;
-        if (!whole) pack_header(ON.base.map, seq, SOURCE_ID_OV5647);
+        if (!whole) pack_header(ON.base.map, seq, SOURCE_ID);
         if (CLIP_NEW) at = 0;
         if (CLIP_NEW || CLIP_FRAMES > 1) {
             CLIP_NEW = 0;
@@ -1467,6 +1548,450 @@ static int run_clip(const struct bridge_args *a) {
     return RUN_DONE;
 }
 
+/* A LOOP RUN: a sensor whose frames come in loops -- a measurement's,
+ * such as a time-of-flight module's correlation of the returning light
+ * with its reference phases, one phase a frame. Its frames reach the
+ * wire as any sensor's do -- unicam writes each into a buffer the
+ * display scans, the samples untouched, and the CPU writes the header.
+ *
+ * ITS FRAMES COME AHEAD OF TIME. Such a sensor captures a loop's frames
+ * a few milliseconds apart, faster than the display scans a frame, and
+ * then waits most of a loop. Each frame lands in a buffer of its own and
+ * goes on the wire at the first vertical blank after it arrived, in the
+ * order they came; a blank with no new frame clears the header, so that
+ * frame is no frame to the far end -- which keeps every frame that comes
+ * and reads the latest at its own pace. The link runs a little faster
+ * than the sensor's frame rate, timed from its frames at start, so the
+ * frames waiting drain between loops: none is dropped while the sensor
+ * keeps its time, and were it ever to run ahead, the oldest waiting
+ * would go back to unicam.
+ *
+ * WHERE IN ITS LOOP A FRAME IS comes from when it arrived. A loop starts
+ * after the long gap between bursts; unicam's frame sequence counts
+ * every frame it saw, the ones it had no buffer for included, so a
+ * dropped frame never shifts the count that follows. The first frame
+ * after a long gap anchors the count, and a frame's place is its
+ * distance from that anchor, modulo the loop. "Long" is measured, not
+ * stated: longer than the mean interval between frames -- unicam's
+ * count over the time it took, which no one odd frame moves. The
+ * sensor's rate is timed between loop starts, past its first loops,
+ * which it takes to settle.
+ *
+ * WHERE THE FAR END IS TOLD rides frame_seq: each loop's first frame
+ * takes the next multiple of the loop, so frame_seq modulo the loop IS
+ * the place on the wire. Nothing is added to the header for it.
+ *
+ * A FRAME AND ITS COUNT GO OUT TOGETHER. The payload rides the overlay
+ * plane and the header row the primary's buffer beneath it; each frame
+ * has a header row of its own, and both planes change in one atomic
+ * commit, so the display takes them in the same blank. Written into the
+ * buffer already on the wire once the overlay's change returned instead,
+ * the header missed that frame's top line and went out with the next:
+ * every frame reached the far end with its predecessor's count -- in the
+ * same order, none lost, and every phase one place off. */
+/* The frame on the wire, those waiting for it, and those unicam holds:
+ * it takes the buffer for the frame after next when a frame starts, and
+ * without one there a burst's next phase is lost. */
+#define LOOP_BUFS_MAX (4 * LOOP_MAX)
+/* The default line, in link clocks, when no planner chose one. */
+#define LOOP_LINE_CLOCKS 2200
+/* The link's frame rate over the sensor's: the frames waiting drain
+ * between bursts. */
+#define LOOP_LEAD 1.05
+/* Long enough to find the bursts and time them before going on the
+ * wire. */
+#define LOOP_WARMUP_BURSTS 32
+#define LOOP_WARMUP_MS 3000
+/* The loops the sensor takes to settle, untimed. */
+#define LOOP_SETTLE 4
+
+/* A control found by the name V4L2 tools print -- lower case, words
+ * joined by underscores -- since a module's private controls have no
+ * fixed id. Its id, or 0. */
+static uint32_t ctrl_by_name(int fd, const char *want) {
+    struct v4l2_queryctrl q = {.id = V4L2_CTRL_FLAG_NEXT_CTRL};
+    while (ioctl(fd, VIDIOC_QUERYCTRL, &q) == 0) {
+        char name[sizeof q.name];
+        size_t i = 0;
+        for (; i + 1 < sizeof name && q.name[i]; i++) {
+            char ch = (char)q.name[i];
+            name[i] = ch == ' ' ? '_'
+                    : (ch >= 'A' && ch <= 'Z') ? (char)(ch - 'A' + 'a') : ch;
+        }
+        name[i] = 0;
+        if (!strcmp(name, want)) return q.id;
+        q.id |= V4L2_CTRL_FLAG_NEXT_CTRL;
+    }
+    return 0;
+}
+
+/* The driver controls the run states, each one the driver must have:
+ * 0, or the run refused with why. */
+static int set_named_ctrls(int sfd, const struct bridge_args *a) {
+    for (int i = 0; i < a->n_ctrls; i++) {
+        uint32_t id = ctrl_by_name(sfd, a->ctrl_name[i]);
+        if (!id)
+            return refuse("the sensor's driver has no control %s",
+                          a->ctrl_name[i]);
+        if (set_ctrl(sfd, id, a->ctrl_value[i], a->ctrl_name[i]))
+            return refuse("the sensor's driver refused %s=%d",
+                          a->ctrl_name[i], (int)a->ctrl_value[i]);
+    }
+    return 0;
+}
+
+static struct {
+    int vfd;
+    /* the loop, and the buffers for it: the frame on the wire, those
+     * waiting for it, and those unicam holds -- it takes the buffer for
+     * the frame after next when a frame starts, and without one there a
+     * burst's next frame is lost. At most `waiting` wait for the wire;
+     * past it the oldest goes back. */
+    uint32_t loop;
+    int bufs, waiting;
+    struct dumb buf[LOOP_BUFS_MAX];
+    int fd[LOOP_BUFS_MAX];              /* each buffer's dmabuf */
+    /* each frame's own header row: the container's base, the header
+     * written into it, swapped in with the frame's payload */
+    struct dumb hdr[LOOP_BUFS_MAX];
+    int blank;                          /* the container's own base on */
+    /* the frames waiting for the wire, oldest first: buffer, frame_seq */
+    int wait_buf[LOOP_BUFS_MAX];
+    uint32_t wait_seq[LOOP_BUFS_MAX];
+    int wait_r, wait_n;
+    int keeping;                        /* frames kept for the wire */
+    /* the arrival timing: the first frame and the latest, by time and by
+     * unicam's count, which counts the frames it dropped; the loop's
+     * first frame, and the frame_seq it takes */
+    int have_prev, anchored;
+    uint32_t prev_seq, anchor, anchor_seq, seq_first;
+    double prev_t, t_first;
+    /* the sensor's rate: the first and latest loop start timed */
+    int timed;
+    uint32_t seq0_first, seq0_last;
+    double t0_first, t0_last;
+    /* told, not acted on */
+    unsigned long bursts, dropped, idle, misplaced;
+} T;
+
+/* A buffer back to unicam, to be written again. */
+static void loop_queue(int i) {
+    struct v4l2_buffer b = {.index = (uint32_t)i,
+        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_DMABUF,
+        .length = (uint32_t)T.buf[i].size};
+    b.m.fd = T.fd[i];
+    if (ioctl(T.vfd, VIDIOC_QBUF, &b) < 0) die("QBUF");
+}
+
+/* One captured frame: placed in its loop, and kept for the wire
+ * or handed straight back. */
+static void loop_take(const struct v4l2_buffer *b) {
+    double t = ts_sec(b->timestamp);
+    uint32_t sq = b->sequence;
+    int i = (int)b->index;
+    if (!T.have_prev) { T.seq_first = sq; T.t_first = t; }
+    if (T.have_prev && sq == T.prev_seq + 1 && sq - T.seq_first >= 2 * T.loop) {
+        double mean = (t - T.t_first) / (double)(sq - T.seq_first);
+        if (t - T.prev_t > mean) {          /* a loop starts */
+            if (T.anchored) {
+                if ((sq - T.anchor) % T.loop) T.misplaced++;
+                /* its first frame takes the next multiple of the loop */
+                uint32_t at = T.anchor_seq + (sq - T.anchor) + T.loop - 1u;
+                T.anchor_seq = at - at % T.loop;
+            }
+            T.anchor = sq;
+            T.anchored = 1;
+            T.bursts++;
+            if (T.bursts == LOOP_SETTLE) T.timed = 0;    /* timed from here */
+            if (!T.timed) { T.timed = 1; T.seq0_first = sq; T.t0_first = t; }
+            T.seq0_last = sq; T.t0_last = t;
+        }
+    }
+    T.have_prev = 1; T.prev_seq = sq; T.prev_t = t;
+    if (!T.anchored || !T.keeping || (b->flags & V4L2_BUF_FLAG_ERROR)) {
+        loop_queue(i);
+        return;
+    }
+    if (T.wait_n == T.waiting) {      /* the oldest goes back */
+        loop_queue(T.wait_buf[T.wait_r]);
+        T.wait_r = (T.wait_r + 1) % T.bufs;
+        T.wait_n--;
+        T.dropped++;
+    }
+    int at = (T.wait_r + T.wait_n) % T.bufs;
+    T.wait_buf[at] = i;
+    T.wait_seq[at] = T.anchor_seq + (sq - T.anchor);
+    T.wait_n++;
+}
+
+/* Every frame unicam has finished, taken. */
+static int loop_drain(void) {
+    for (;;) {
+        struct v4l2_buffer b = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                                .memory = V4L2_MEMORY_DMABUF};
+        if (ioctl(T.vfd, VIDIOC_DQBUF, &b) < 0)
+            return errno == EAGAIN ? 0 : -1;
+        loop_take(&b);
+    }
+}
+
+/* The header row's buffer and the payload's on the wire from the next
+ * vertical blank, both in one commit, so the display takes them in the
+ * same blank: a frame's count never goes out with another frame's
+ * samples. The call returns once the display has taken them: the frame
+ * before is off the wire. */
+static int show_frame(uint32_t base_fb, uint32_t pay_fb) {
+    drmModeAtomicReqPtr req = drmModeAtomicAlloc();
+    if (!req) return -1;
+    int rc = (drmModeAtomicAddProperty(req, D.primary, D.primary_fb,
+                                       base_fb) < 0 ||
+              drmModeAtomicAddProperty(req, D.plane, D.plane_fb,
+                                       pay_fb) < 0)
+        ? -1 : drmModeAtomicCommit(D.dfd, req, 0, NULL);
+    drmModeAtomicFree(req);
+    return rc;
+}
+
+/* Frame `i` on the wire, its count `fs` in its own header row. */
+static int loop_scan(int i, uint32_t fs) {
+    pack_header(T.hdr[i].map, fs, SOURCE_ID);
+    if (show_frame(T.hdr[i].fb_id, T.buf[i].fb_id)) return -1;
+    bstate.payload_map = T.buf[i].map;
+    base_map_ro = T.hdr[i].map;
+    T.blank = 0;
+    return 0;
+}
+
+static int run_loop(const struct bridge_args *a) {
+    CLIP_RUN = 0; LOOP_RUN = a->loop; paused = 0;
+    char video_found[288], why[256];
+    const char *video = a->video[0] ? a->video : NULL;
+    int sfd = -1, streaming = 0, on_plane = 0,
+        type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    int rc = RUN_DONE;
+    memset(&T, 0, sizeof T);
+    T.vfd = -1;
+    T.loop = a->loop;
+    T.bufs = 4 * (int)a->loop;
+    T.waiting = T.bufs - 4;
+    for (int i = 0; i < LOOP_BUFS_MAX; i++) T.fd[i] = -1;
+    if (!D.primary || !D.primary_fb || !D.plane_fb)
+        return refuse("the display has no primary plane to carry a frame's "
+                      "header with its payload in one commit");
+    if (!video) {
+        if (resolve_capture_node(video_found, sizeof video_found))
+            return refuse("no CSI-2 receiver node found by name; name one "
+                          "with --video");
+        video = video_found;
+    }
+    sfd = open(a->subdev, O_RDWR);
+    if (sfd < 0) { rc = refuse("open %s: %s", a->subdev, strerror(errno)); goto out; }
+    struct v4l2_subdev_format sf = {.which = V4L2_SUBDEV_FORMAT_ACTIVE};
+    if (ioctl(sfd, VIDIOC_SUBDEV_G_FMT, &sf) < 0) {
+        rc = refuse("the module will not say its format: %s", strerror(errno));
+        goto out;
+    }
+    fmt_row = -1;
+    for (unsigned i = 0; i < sizeof FORMATS / sizeof *FORMATS; i++)
+        if (FORMATS[i].mbus == sf.format.code) { fmt_row = (int)i; break; }
+    if (fmt_row < 0) {
+        rc = refuse("the sensor sends mediabus code 0x%x, which this build "
+                    "does not know", sf.format.code);
+        goto out;
+    }
+    WIDTH = sf.format.width; HEIGHT = sf.format.height;
+    if ((rc = set_named_ctrls(sfd, a)) != 0) goto out;
+
+    /* --- the link: the planner's, else at the module's own rate,
+     * which is measured once its frames flow ----------------------- */
+    uint32_t cw = link_width(video, WIDTH, HEIGHT, FORMATS[fmt_row].bits,
+                             FORMATS[fmt_row].v4l2);
+    if (!cw) {
+        rc = refuse("unicam keeps no stride near a %u-sample line", WIDTH);
+        goto out;
+    }
+    T.vfd = open(video, O_RDWR | O_NONBLOCK);
+    if (T.vfd < 0) { rc = refuse("open %s: %s", video, strerror(errno)); goto out; }
+
+    /* The buffers the module's frames land in are the display's: the
+     * header row's container first, then one payload buffer a frame. */
+    struct container *c = display_buffers(cw, HEIGHT + 1, HEIGHT);
+    for (int i = 0; i < T.bufs; i++) {
+        T.buf[i] = make_fb(D.dfd, cw, HEIGHT);
+        T.hdr[i] = make_fb(D.dfd, cw, HEIGHT + 1);
+        if (drmPrimeHandleToFD(D.dfd, T.buf[i].handle,
+                               DRM_CLOEXEC | DRM_RDWR, &T.fd[i]))
+            die("PrimeHandleToFD");
+    }
+    struct v4l2_format fmt = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
+    fmt.fmt.pix.width = WIDTH; fmt.fmt.pix.height = HEIGHT;
+    fmt.fmt.pix.pixelformat = FORMATS[fmt_row].v4l2;
+    fmt.fmt.pix.field = V4L2_FIELD_NONE;
+    fmt.fmt.pix.bytesperline = T.buf[0].pitch;
+    if (ioctl(T.vfd, VIDIOC_S_FMT, &fmt) < 0 ||
+        fmt.fmt.pix.pixelformat != FORMATS[fmt_row].v4l2 ||
+        fmt.fmt.pix.width != WIDTH || fmt.fmt.pix.height != HEIGHT) {
+        rc = refuse("unicam will not deliver %ux%u %d-bit %s", WIDTH, HEIGHT,
+                    FORMATS[fmt_row].bits, FORMATS[fmt_row].order);
+        goto out;
+    }
+    if (fmt.fmt.pix.bytesperline != T.buf[0].pitch) {
+        rc = refuse("unicam kept bytesperline %u, need %u: the stride IS "
+                    "the bridge, refusing", fmt.fmt.pix.bytesperline,
+                    T.buf[0].pitch);
+        goto out;
+    }
+    struct v4l2_requestbuffers req = {.count = (uint32_t)T.bufs,
+        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_DMABUF};
+    if (ioctl(T.vfd, VIDIOC_REQBUFS, &req) < 0 || req.count != (uint32_t)T.bufs) {
+        rc = refuse("unicam gave %u of %d capture buffers", req.count,
+                    T.bufs);
+        goto out;
+    }
+    for (int i = 0; i < T.bufs; i++) loop_queue(i);
+    if (ioctl(T.vfd, VIDIOC_STREAMON, &type) < 0) {
+        rc = refuse("STREAMON: %s", strerror(errno));
+        goto out;
+    }
+    streaming = 1;
+
+    /* --- the sensor found and timed before anything goes out ------- */
+    struct timespec w0, wn;
+    clock_gettime(CLOCK_MONOTONIC, &w0);
+    for (;;) {
+        struct pollfd pf = {.fd = T.vfd, .events = POLLIN};
+        poll(&pf, 1, 100);
+        if (loop_drain() < 0) die("DQBUF");
+        clock_gettime(CLOCK_MONOTONIC, &wn);
+        long ms = (wn.tv_sec - w0.tv_sec) * 1000
+                + (wn.tv_nsec - w0.tv_nsec) / 1000000;
+        if (T.bursts >= LOOP_WARMUP_BURSTS) break;
+        if (!running || ms > LOOP_WARMUP_MS) {
+            rc = refuse("%lu whole loop(s) in %ld ms (frames %s): no "
+                        "bursts of %u to find the loop by", T.bursts, ms,
+                        T.have_prev ? "came" : "never came", T.loop);
+            goto out;
+        }
+    }
+    double frame_hz = (double)(T.seq0_last - T.seq0_first)
+                    / (T.t0_last - T.t0_first);
+    double loop_s = T.loop / frame_hz;
+    uint32_t link_khz = a->link_khz ? a->link_khz : SINK_KHZ;
+    uint32_t line = a->line_clocks ? a->line_clocks : LOOP_LINE_CLOCKS;
+    uint32_t frame = a->frame_lines ? a->frame_lines
+        : (uint32_t)(link_khz * 1000.0 / (frame_hz * LOOP_LEAD * line));
+    if (line < WIDTH || frame < HEIGHT + 10 ||
+        derive_raster(WIDTH, HEIGHT, cw, link_khz * 1000.0,
+                      (int)line - (int)WIDTH,
+                      (int)frame - (int)HEIGHT - LOCK_SPARE, link_khz) < 0) {
+        rc = refuse("a %ux%u frame does not fit a %u-clock line and "
+                    "%u-line frame at %u kHz", WIDTH, HEIGHT, line, frame,
+                    link_khz);
+        goto out;
+    }
+    set_raster(&LINK);
+    double link_hz = link_khz * 1000.0 / ((double)LINK.h_total * LINK.v_total);
+    printf("bridge: loop of %u %ux%u, every %.3f ms (%.3f frames/s); "
+           "link raster %ux%u of %ux%u at %u kHz, %.3f Hz, %+.1f%% on the "
+           "sensor%s\n",
+           T.loop, WIDTH, HEIGHT, loop_s * 1e3, frame_hz, LINK.h_active,
+           LINK.v_active, LINK.h_total, LINK.v_total, link_khz, link_hz,
+           (link_hz / frame_hz - 1.0) * 100.0,
+           link_hz < frame_hz ? " -- SLOWER: frames will be dropped" : "");
+
+    /* --- on the wire: each frame as it came, at the first blank after
+     * it arrived; the header clear until there is one --------------- */
+    if (c == &NEW) memset(c->base.map, 0, HEADER_BYTES);
+    if (display_show(&MODE, why, sizeof why) < 0) {
+        rc = refuse("%s", why);
+        goto out;
+    }
+    memset(ON.base.map, 0, HEADER_BYTES);
+    bstate.locked = 1;
+    bstate.sensor_fd = sfd;
+    run_started();
+    T.keeping = 1;
+    T.dropped = T.idle = 0;             /* the warm-up's were nobody's */
+
+    /* Each pass is one frame of the link. A frame waiting goes on the
+     * wire with its own header row, both taken at the next vertical
+     * blank; the one before is then off the wire and goes back to
+     * unicam. With none waiting, the container's own base goes back on,
+     * its header clear: the frame the display repeats is no frame. */
+    int shown = -1;
+    uint32_t frames = 0;
+    while (running && !time_up()) {
+        if (reconfig_pending) { rc = RUN_RECONFIGURE; break; }
+        if (loop_drain() < 0) {
+            fprintf(stderr, "bridge: DQBUF: %s\n", strerror(errno));
+            break;
+        }
+        if (T.wait_n && !paused) {
+            int i = T.wait_buf[T.wait_r];
+            uint32_t fs = T.wait_seq[T.wait_r];
+            T.wait_r = (T.wait_r + 1) % T.bufs;
+            T.wait_n--;
+            if (loop_scan(i, fs)) {
+                fprintf(stderr, "bridge: atomic commit: %s\n",
+                        strerror(errno));
+                loop_queue(i);
+                break;
+            }
+            on_plane = 1;
+            if (shown >= 0) loop_queue(shown);
+            shown = i;
+            bstate.seq = fs;
+        } else {
+            int bad = T.blank || shown < 0
+                ? wait_vblank()
+                : show_frame(ON.base.fb_id, T.buf[shown].fb_id);
+            if (bad < 0) {
+                fprintf(stderr, "bridge: idle blank: %s\n", strerror(errno));
+                break;
+            }
+            T.blank = 1;
+            base_map_ro = ON.base.map;
+            T.idle++;
+        }
+        frames++;
+        struct bridge_frame bf = {.seq = frames, .locked = 1, .sensor_fd = sfd};
+        bridge_frame_hook(&bf);
+        if ((frames & 31) == 0) link_watch(0);
+        if (frames % 3600 == 0)
+            printf("bridge: loop %lu loops, %lu frames dropped, %lu "
+                   "blanks idle, %lu out of place\n", T.bursts, T.dropped,
+                   T.idle, T.misplaced);
+        ctl_poll();
+    }
+    printf("bridge: loop %u link frames; %lu loops, %lu frames "
+           "dropped, %lu blanks idle, %lu out of place\n", frames, T.bursts,
+           T.dropped, T.idle, T.misplaced);
+out:
+    /* The loop's buffers leave the display before they are freed: the
+     * container's own base and payload back in one commit, its header
+     * clear, so the frame that shows them is no frame to the far end. */
+    if (on_plane) {
+        show_frame(ON.base.fb_id, ON.pay.fb_id);
+        bstate.payload_map = ON.pay.map;
+        base_map_ro = ON.base.map;
+    }
+    if (streaming) ioctl(T.vfd, VIDIOC_STREAMOFF, &type);
+    if (T.vfd >= 0) {
+        struct v4l2_requestbuffers none = {.count = 0,
+            .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_DMABUF};
+        ioctl(T.vfd, VIDIOC_REQBUFS, &none);
+        close(T.vfd);
+    }
+    for (int i = 0; i < T.bufs; i++) {
+        if (T.fd[i] >= 0) close(T.fd[i]);
+        free_fb(&T.buf[i]);
+        free_fb(&T.hdr[i]);
+    }
+    if (sfd >= 0) close(sfd);
+    bstate.sensor_fd = -1;
+    return rc;
+}
+
 /* A SENSOR RUN: the sensor in the mode asked for (or the one it is in),
  * its line locked to the link's and its frame start held by the genlock.
  * It ends cleanly for a reconfiguration: the next capture is sent to the
@@ -1474,7 +1999,7 @@ static int run_clip(const struct bridge_args *a) {
  * the last frame on the wire is a whole sensor frame, held until the next
  * run draws over it -- and only then does the sensor stop. */
 static int run_sensor(const struct bridge_args *a) {
-    CLIP_RUN = 0; paused = 0;
+    CLIP_RUN = 0; LOOP_RUN = 0; paused = 0;
     order_given = a->order_given;
     const char *want_order = a->order_given ? a->order : NULL;
     unsigned want_w = a->want_w, want_h = a->want_h;
@@ -1507,6 +2032,7 @@ static int run_sensor(const struct bridge_args *a) {
         rc = refuse("open %s: %s", a->subdev, strerror(errno));
         goto out;
     }
+    if ((rc = set_named_ctrls(sfd, a)) != 0) goto out;
     /* The mode asked for, or -- none asked -- the one the sensor is in:
      * this file has no size of its own to offer it. */
     struct v4l2_subdev_format sf = {
@@ -1823,7 +2349,7 @@ static int run_sensor(const struct bridge_args *a) {
         clock_gettime(CLOCK_MONOTONIC, &dqts);
         double t_now = dqts.tv_sec + dqts.tv_nsec * 1e-9;
         seq++;
-        pack_header(ON.base.map, seq, SOURCE_ID_OV5647);
+        pack_header(ON.base.map, seq, SOURCE_ID);
         /* Where the NEXT frame lands: the displayed buffer, or the
          * scratch one while paused -- or once a reconfiguration is
          * waiting, so the capture already in flight is the displayed
@@ -2056,7 +2582,7 @@ int main(int argc, char **argv) {
         /* the reference vectors' frame, not a default of this file's */
         WIDTH = 1920; HEIGHT = 1080;
         for (int i = 0; i < 3; i++) {
-            pack_header(h, seqs[i], SOURCE_ID_OV5647);
+            pack_header(h, seqs[i], SOURCE_ID);
             for (int b = 0; b < 48; b++) printf("%02x", h[b]);
             printf("\n");
         }
@@ -2070,7 +2596,8 @@ int main(int argc, char **argv) {
                    (char)((FORMATS[i].bayerlink >> 16) & 0xff),
                    (char)((FORMATS[i].bayerlink >> 24) & 0xff));
         for (unsigned i = 0; i < sizeof FORMATS / sizeof *FORMATS; i++)
-            for (unsigned dy = 0; dy < 2; dy++)
+            for (unsigned dy = 0; dy < 2 && strcmp(FORMATS[i].order, "MONO");
+                 dy++)
                 for (unsigned dx = 0; dx < 2; dx++)
                     printf("crop %s %u %u %s\n", FORMATS[i].order, dx, dy,
                            FORMATS[format_after_crop((int)i, dx, dy)].order);
@@ -2094,6 +2621,9 @@ int main(int argc, char **argv) {
     /* --- display: opened once, held to the end -------------------- */
     if (open_display(&D.dfd, &D.conn, &D.crtc, &D.crtc_index)) return 1;
     D.plane = overlay_plane(D.dfd, D.crtc_index);
+    D.primary = find_plane(D.dfd, D.crtc_index, DRM_PLANE_TYPE_PRIMARY, 0);
+    D.primary_fb = D.primary ? plane_prop(D.dfd, D.primary, "FB_ID") : 0;
+    D.plane_fb = plane_prop(D.dfd, D.plane, "FB_ID");
     SINK_KHZ = sink_link_khz();
     ctl_open();
 
@@ -2101,7 +2631,29 @@ int main(int argc, char **argv) {
     struct bridge_args prev;
     int have_prev = 0;
     for (;;) {
-        int r = a.clip[0] ? run_clip(&a) : run_sensor(&a);
+        /* What the sensor's own module states of it, where the run
+         * names none: how its frames come, what its driver is set to. */
+        struct bridge_args run = a;
+        if (!run.clip[0]) {
+            struct bridge_source src = {0};
+            bridge_source_hook(&src);
+            if (!run.loop) run.loop = src.loop;
+            for (int i = 0; !a.n_ctrls && i < src.n_controls &&
+                            i < CTRLS_MAX; i++) {
+                snprintf(run.ctrl_name[i], sizeof run.ctrl_name[0], "%s",
+                         src.controls[i].name);
+                run.ctrl_value[i] = src.controls[i].value;
+                run.n_ctrls = i + 1;
+            }
+            if (run.loop && (run.loop < 2 || run.loop > LOOP_MAX)) {
+                fprintf(stderr, "bridge: the sensor's module states a "
+                        "loop of %u; 2 to %d are carried\n", run.loop,
+                        LOOP_MAX);
+                return 1;
+            }
+        }
+        int r = run.clip[0] ? run_clip(&run) : run.loop ? run_loop(&run)
+                                                 : run_sensor(&run);
         if (r == RUN_RECONFIGURE) {
             prev = a; have_prev = 1;
             a = PENDING;

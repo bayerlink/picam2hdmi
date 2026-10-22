@@ -571,7 +571,7 @@ def test_the_keeper_brings_the_firmware_up_once_per_bridge_run(
                         lambda: {"uptime": str(state["uptime"])})
     monkeypatch.setattr(serve, "_bridge_command", lambda line, **k: state["fw"])
     monkeypatch.setattr(serve, "_firmware_up",
-                        lambda aaa=None: calls.append(aaa) or "ok")
+                        lambda aaa=None, display=None: calls.append(aaa) or "ok")
     clock = {"now": 1_000.0}
     monkeypatch.setattr(serve.time, "time", lambda: clock["now"])
     assert sup.firmware_once()
@@ -600,7 +600,7 @@ def test_the_panel_and_the_keeper_do_not_both_bring_the_firmware_up(
     monkeypatch.setattr(serve, "_bridge_command",
                         lambda line, **k: "ok build=unproven")
     monkeypatch.setattr(serve, "_firmware_up",
-                        lambda aaa=None: calls.append(aaa) or "ok")
+                        lambda aaa=None, display=None: calls.append(aaa) or "ok")
     monkeypatch.setattr(serve.time, "time", lambda: 500.0)
     assert sup.firmware_now() == "ok"
     assert not sup.firmware_once()
@@ -814,3 +814,45 @@ def test_a_display_raster_stays_inside_the_displays_counters():
     from picam2hdmi.serve import display_raster
     tv = display_raster(1920, 1080, 148500, 14510, 2047, 27000, (12, 11))
     assert tv["v_total"] < 2048 and tv["h_total"] < 4096
+
+
+def test_a_board_that_keeps_the_pictures_shows_the_display_chosen(
+        monkeypatch):
+    """Where the board keeps the pictures, the firmware is brought up on
+    the sensor module's mode of the frame the bridge streams -- the mode
+    brings the display its pictures are shown on -- or, the module stating
+    none, the frame itself; the init states no display unless one is
+    named. A board showing the link's own timing has no display to
+    choose, and says so rather than taking a name it cannot honour."""
+    from picam2hdmi import serve
+    fw = {"status": "ok build=unproven tv_khz=27000,74250,148500,54000 "
+                    "keeps=1 counters=12x11",
+          "modes": "ok phases_240x180=240x180x12,0,0,0,0"}
+    sent = []
+
+    def command(line, **k):
+        sent.append(line)
+        return fw.get(line, "ok")
+
+    monkeypatch.setattr(serve, "_bridge_command", command)
+    monkeypatch.setattr(serve, "_bridge_status", lambda: {
+        "width": "240", "height": "180", "bits": "12", "order": "MONO",
+        "link_khz": "148500", "h_total": "2200", "v_total": "535"})
+    assert serve._firmware_up() == "ok"
+    init = dict(t.split("=") for t in sent[-1].split()[1:])
+    assert init["mode"] == "phases_240x180"
+    assert not [k for k in init if k.startswith(("display.", "frame."))]
+    fw["modes"] = "ok"                      # a module that states no mode
+    assert serve._firmware_up() == "ok"
+    init = dict(t.split("=") for t in sent[-1].split()[1:])
+    assert (init["frame.width"], init["frame.height"], init["frame.bits"],
+            init["frame.bayer_phase"]) == ("240", "180", "12", "0")
+    assert not [k for k in init if k.startswith("display.")]
+    assert serve._firmware_up(display="1080p60") == "ok"
+    init = dict(t.split("=") for t in sent[-1].split()[1:])
+    assert (init["display.pixel_khz"], init["display.h_total"],
+            init["display.v_total"]) == ("148500", "2200", "1125")
+    fw["status"] = fw["status"].replace("keeps=1", "keeps=0")
+    sent.clear()
+    assert serve._firmware_up(display="1080p60").startswith("err ")
+    assert not [line for line in sent if line.startswith("init")]

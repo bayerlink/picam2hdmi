@@ -94,7 +94,8 @@ def check(binary: Path) -> bool:
 
     for line in (l for l in out if l.startswith("fmt ")):
         _, order, bits, stamped = line.split()
-        if stamped != fourcc_for(order, int(bits)):
+        if stamped != fourcc_for(None if order == "MONO" else order,
+                                 int(bits)):
             return False
 
     by_phase = {phase: order for order, phase in BAYER_PHASE.items()}
