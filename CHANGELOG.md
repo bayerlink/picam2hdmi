@@ -35,6 +35,16 @@ moves is named here.
   next, so every frame reached the far end with its predecessor's count
   -- in order, none lost, every phase one place off.
 
+- **A sink that comes back is seen to.** The bridge reads the hot-plug
+  line itself every frame, where the kernel only polls it -- a Pi before
+  the 4 takes hot-plug on a GPIO with no interrupt, about every ten
+  seconds. A board loading its bitstream drops the line for some 50 ms
+  and comes back with every register at reset; a drop and a return is now
+  a replug, and the link hook puts the far end's configuration back
+  within a frame or two. The pin is the device tree's (`hpd-gpios`), read
+  through `/dev/gpiomem` where its controller is the Broadcom GPIO block;
+  elsewhere the kernel's status is the only one.
+
 - **Driver controls by name** (`--ctrl name=value`, repeatable), set
   before the sensor streams, each one the driver must have.
 

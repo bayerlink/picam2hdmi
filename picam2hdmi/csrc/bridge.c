@@ -884,12 +884,9 @@ static void ctl_poll(void) {
     close(c);
 }
 
-static void link_watch(int force) {
-    static int last = -1;
-    uint8_t *edid;
-    int up = link_read_state(&edid);
-    if (up == last && !force) return;
-    last = up;
+/* A link edge: the DDC bus re-probed where the link is up, and the link
+ * hook told -- where a module puts the far end's registers back. */
+static void link_event(int up, uint8_t *edid) {
     if (up) ddc_probe(conn_dir);
     BMODE = (struct bridge_mode){ .raster = RASTER, .width = WIDTH,
                                   .height = HEIGHT, .lines = VDISP,
@@ -901,6 +898,124 @@ static void link_watch(int force) {
                              .mode = &BMODE };
     printf("bridge: link %s\n", up ? "up" : "down");
     bridge_link_hook(&l);
+}
+
+static void link_watch(int force) {
+    static int last = -1;
+    uint8_t *edid;
+    int up = link_read_state(&edid);
+    if (up == last && !force) return;
+    last = up;
+    link_event(up, edid);
+}
+
+/* THE HOT-PLUG LINE ITSELF, read every frame where the kernel only polls
+ * it. A Pi before the 4 takes hot-plug on a GPIO with no interrupt, and
+ * its kernel looks every ten seconds or so: a sink that drops the line
+ * for a moment -- a board loading its bitstream releases its pins for
+ * some 55 ms -- comes back with every register at reset, and the kernel
+ * never saw it go. Read here every frame, a drop and a return is a
+ * replug, and the link hook puts the far end's registers back. The pin
+ * is the device tree's (`hpd-gpios` on the HDMI node), read where its
+ * controller is the Broadcom GPIO block, whose level registers
+ * /dev/gpiomem maps; elsewhere the kernel's status is the only one, and
+ * where hot-plug is an interrupt it is prompt anyway. */
+static volatile const uint32_t *hpd_gpio;   /* the GPIO block, or NULL */
+static unsigned hpd_pin;
+static int hpd_active_low, hpd_was = 1;
+static struct timespec hpd_dropped_at;
+
+static size_t read_whole(const char *path, uint8_t *buf, size_t cap) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, cap, f);
+    fclose(f);
+    return n;
+}
+
+static uint32_t be32(const uint8_t *b) {
+    return (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 |
+           (uint32_t)b[2] << 8 | b[3];
+}
+
+/* The node under /proc/device-tree/soc whose name starts `prefix` and has
+ * property `prop`: its path into `out`, or 0. */
+static int soc_node(const char *prefix, const char *prop, char *out,
+                    size_t cap) {
+    DIR *d = opendir("/proc/device-tree/soc");
+    if (!d) return 0;
+    struct dirent *e;
+    int found = 0;
+    while (!found && (e = readdir(d))) {
+        if (strncmp(e->d_name, prefix, strlen(prefix))) continue;
+        snprintf(out, cap, "/proc/device-tree/soc/%s/%s", e->d_name, prop);
+        found = access(out, R_OK) == 0;
+    }
+    closedir(d);
+    return found;
+}
+
+static void hpd_open(void) {
+    char path[320], ctl[320];
+    uint8_t spec[12], ph[4], compat[128];
+    if (!soc_node("hdmi@", "hpd-gpios", path, sizeof path) ||
+        read_whole(path, spec, sizeof spec) != sizeof spec)
+        return;
+    /* the controller the pin belongs to, by its phandle */
+    DIR *d = opendir("/proc/device-tree/soc");
+    struct dirent *e;
+    int ours = 0;
+    while (d && !ours && (e = readdir(d))) {
+        if (strncmp(e->d_name, "gpio@", 5)) continue;
+        snprintf(ctl, sizeof ctl, "/proc/device-tree/soc/%s/phandle",
+                 e->d_name);
+        if (read_whole(ctl, ph, 4) != 4 || be32(ph) != be32(spec)) continue;
+        snprintf(ctl, sizeof ctl, "/proc/device-tree/soc/%s/compatible",
+                 e->d_name);
+        size_t n = read_whole(ctl, compat, sizeof compat - 1);
+        compat[n] = 0;
+        for (size_t at = 0; at < n; at += strlen((char *)compat + at) + 1)
+            if (!strcmp((char *)compat + at, "brcm,bcm2835-gpio") ||
+                !strcmp((char *)compat + at, "brcm,bcm2711-gpio"))
+                ours = 1;
+    }
+    if (d) closedir(d);
+    if (!ours) return;
+    int fd = open("/dev/gpiomem", O_RDONLY | O_SYNC);
+    if (fd < 0) return;
+    void *map = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) return;
+    hpd_gpio = map;
+    hpd_pin = be32(spec + 4);
+    hpd_active_low = be32(spec + 8) & 1;
+    printf("bridge: hot-plug read from GPIO %u every frame\n", hpd_pin);
+}
+
+static int hpd_asserted(void) {
+    /* GPLEV0 at 0x34, GPLEV1 after it: a bit a pin */
+    uint32_t level = hpd_gpio[(0x34 >> 2) + (hpd_pin >> 5)];
+    int high = (int)((level >> (hpd_pin & 31)) & 1u);
+    return hpd_active_low ? !high : high;
+}
+
+/* One frame's look at the line: a drop remembered, a return a replug. */
+static void hpd_watch(void) {
+    if (!hpd_gpio) return;
+    int now = hpd_asserted();
+    if (now == hpd_was) return;
+    hpd_was = now;
+    if (!now) {
+        clock_gettime(CLOCK_MONOTONIC, &hpd_dropped_at);
+        return;
+    }
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    long ms = (t.tv_sec - hpd_dropped_at.tv_sec) * 1000
+            + (t.tv_nsec - hpd_dropped_at.tv_nsec) / 1000000;
+    printf("bridge: the sink's hot-plug dropped for %ld ms: a replug\n", ms);
+    link_event(0, NULL);
+    link_watch(1);
 }
 
 /* ---------------------------------------------------------------- */
@@ -1541,6 +1656,7 @@ static int run_clip(const struct bridge_args *a) {
         bstate.seq = seq;
         struct bridge_frame bf = {.seq = seq, .locked = 1, .sensor_fd = -1};
         bridge_frame_hook(&bf);
+        hpd_watch();
         if ((seq & 31) == 0) link_watch(0);
         ctl_poll();
     }
@@ -1956,6 +2072,7 @@ static int run_loop(const struct bridge_args *a) {
         frames++;
         struct bridge_frame bf = {.seq = frames, .locked = 1, .sensor_fd = sfd};
         bridge_frame_hook(&bf);
+        hpd_watch();
         if ((frames & 31) == 0) link_watch(0);
         if (frames % 3600 == 0)
             printf("bridge: loop %lu loops, %lu frames dropped, %lu "
@@ -2533,6 +2650,7 @@ static int run_sensor(const struct bridge_args *a) {
             .locked = locked, .sensor_fd = sfd};
         bridge_frame_hook(&bf);
         /* once a second: cheap, and a replug never waits long */
+        hpd_watch();
         if ((seq & 31) == 0) link_watch(0);
         /* every frame: an accept() that mostly returns EAGAIN */
         ctl_poll();
@@ -2626,6 +2744,7 @@ int main(int argc, char **argv) {
     D.plane_fb = plane_prop(D.dfd, D.plane, "FB_ID");
     SINK_KHZ = sink_link_khz();
     ctl_open();
+    hpd_open();
 
     /* --- runs: the command line's, then each reconfiguration -------- */
     struct bridge_args prev;
