@@ -6,6 +6,7 @@ from __future__ import annotations
 import http.client
 import json
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -18,10 +19,13 @@ from http.server import ThreadingHTTPServer
 def _fake_runner(frames, mode=None, connector=None, card_path=None,
                  container=False,
                  on_frame=None):
-    """Consume frames like the real scanout, minus the silicon."""
+    """Consume frames like the real scanout, minus the silicon -- paced,
+    as a page flip waits for its vblank: a loop that never waits starves
+    the server's threads of the interpreter, and their requests time out."""
     for index, _ in enumerate(frames):
         if on_frame is not None:
             on_frame(index)                    # raises _Stop on shutdown
+        time.sleep(0.001)
 
 
 @pytest.fixture()
