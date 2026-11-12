@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "picam2hdmi"
-version = "0.4.0"
+version = "0.5.0"
 description = "Raspberry Pi camera as a raw-Bayer HDMI source, speaking the bayerlink protocol"
 readme = "README.md"
 license = "MIT"
@@ -25,11 +25,10 @@ dependencies = [
     # The wire format. Lives in the protocol's own repository so every
     # encoder and receiver conforms to one spec; this tool re-exports its
     # codec and adds only what is the Pi's.
-    # 0.5.0 is the floor, not a preference: this package imports
-    # source_id_for, which the PUBLISHED 0.4.0 does not have -- the
-    # sensor-to-id table landed after that release was cut. Checked
+    # 0.6.0 is the floor, not a preference: this package imports
+    # bayerlink.rasters, which the PUBLISHED 0.5.0 does not have. Checked
     # against the real wheel, not against the sibling checkout.
-    "bayerlink>=0.5.0",
+    "bayerlink>=0.6.0",
 ]
 
 [project.optional-dependencies]

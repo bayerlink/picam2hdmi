@@ -7,7 +7,7 @@ what follows is a consequence of settling that.
 Pre-1.0, so the HTTP surface and the CLI can still move. Anything that
 moves is named here.
 
-## Unreleased
+## 0.5.0
 
 ### Added
 
